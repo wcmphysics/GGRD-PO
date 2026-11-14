@@ -49,9 +49,9 @@ stress_model:
   treatment_constants:
     anneal: -0.0000013
     oxidation: 0.0000013
-  noise_std: 0.045
+  noise_std: 0.05
   outlier_rate: 0.05
   outlier_min_abs: 1.5
   stress_min: -10.0
   stress_max: 10.0
-  decimal_places: 4
+  decimal_places: 8

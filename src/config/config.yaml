@@ -2,14 +2,14 @@
 # Paths are relative to the repository root. Predict and optimize may reuse an existing bundle.
 # Train-only expects data/pseudo_data.csv. Enable generate for a fresh synthetic demo.
 generate:
-  enabled: false
+  enabled: true
   config: src/config/pseudo_data_config.yaml
 train:
   enabled: true
   config: src/config/train_demo.yaml
 predict:
-  enabled: false
+  enabled: true
   config: src/config/predict_demo.yaml
 optimize:
-  enabled: false
+  enabled: true
   config: src/config/optimize_free_demo.yaml  # Or src/config/optimize_fixed_demo.yaml.
