@@ -1,0 +1,36 @@
+bundle_directory: output/train_demo/model
+domain:
+  source: synthetic
+  generator_config_path: src/config/pseudo_data_config.yaml
+  parameter_units:
+    time: synthetic_time_unit
+    temperature: synthetic_temperature_unit
+    thickness: synthetic_thickness_unit
+search:
+  mode: fixed
+  N_step_search: 4
+  active_count: 2
+  pins:
+    1:
+      operation: deposition
+      material: TiN
+  seed: 42
+  max_skeletons: 50000
+  max_candidates: 2048
+  max_attempts: 10240
+  batch_size: 256
+  top_k: 10
+objective:
+  target_stress: 0.3
+  target_unit: synthetic_stress_unit
+  stress_scale: 1.0
+  stress_weight: 1.0
+  cost_weight: 0.0
+  penalty_weight: 0.0
+  cost_rule: steps_fraction
+  penalty_rule: vacuum_break_fraction
+support:
+  radius: 0.25
+  min_coverage: 0.75
+output:
+  directory: output/optimize_fixed_demo

@@ -3,8 +3,10 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, StrictBool, ValidationError, model_validator
 import yaml
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode
 
 from src.config.pipeline_common import (
     NonemptyText,
@@ -15,6 +17,7 @@ from src.config.pipeline_common import (
     PositiveNumber,
     StrictConfig,
 )
+from src.optimize.settings import ObjectiveConfig, SearchConfig, SearchDomain, SupportConfig
 
 FoldCount = Annotated[int, Field(strict=True, ge=2)]
 AlphaGrid = Annotated[list[NonnegativeNumber], Field(min_length=1)]
@@ -57,7 +60,7 @@ class ForestParameters(StrictConfig):
 
     n_estimators: PositiveInt
     min_samples_leaf: PositiveInt
-    n_jobs: Literal[1]
+    n_jobs: Annotated[int, Field(strict=True, ge=1, le=1)]
 
 
 class RidgeGrid(StrictConfig):
@@ -84,7 +87,7 @@ class BaseConfig(StrictConfig):
     """Common name and search policy for an ordered base model."""
 
     name: NonemptyText
-    enable_search: bool
+    enable_search: StrictBool
 
     @model_validator(mode="after")
     def validate_search(self) -> "BaseConfig":
@@ -110,6 +113,9 @@ class ForestConfig(BaseConfig):
     search_grid: ForestGrid | None
 
 
+ModelConfig = Annotated[RidgeConfig | ForestConfig, Field(discriminator="estimator")]
+
+
 class MetaConfig(StrictConfig):
     """Shrinkage and numerical precision for simplex fitting."""
 
@@ -122,7 +128,7 @@ class MetaConfig(StrictConfig):
 class AnalysisConfig(StrictConfig):
     """Controls the paired transition feature ablation."""
 
-    transition_ablation: bool
+    transition_ablation: StrictBool
 
 
 class OutputConfig(StrictConfig):
@@ -137,7 +143,7 @@ class TrainConfig(StrictConfig):
     data: DataConfig
     features: FeaturesConfig
     cv: CrossValidationConfig
-    models: Annotated[list[Annotated[RidgeConfig | ForestConfig, Field(discriminator="estimator")]], Field(min_length=2)]
+    models: Annotated[list[ModelConfig], Field(min_length=2)]
     meta: MetaConfig
     analysis: AnalysisConfig
     output: OutputConfig
@@ -167,10 +173,39 @@ class SyntheticDomainConfig(StrictConfig):
     parameter_units: ParameterUnits
 
 
+class OptimizeConfig(StrictConfig):
+    """Bundle and validated process domain for a fresh search run."""
+
+    bundle_directory: Path
+    domain: Annotated[SyntheticDomainConfig | SearchDomain, Field(discriminator="source")]
+    search: SearchConfig
+    objective: ObjectiveConfig
+    support: SupportConfig
+    output: OutputConfig
+
+
+class _UniqueYamlLoader(yaml.SafeLoader):
+    """Reject duplicate keys before Pydantic validates the decoded data."""
+
+    def construct_mapping(self, node: MappingNode, deep: bool = False) -> dict:
+        """Build a mapping without silently replacing the first value."""
+        self.flatten_mapping(node)
+        result = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, (str, int)) or isinstance(key, bool):
+                raise ConstructorError(None, None, f"Expected a string or integer mapping key, found {key!r}",
+                                       key_node.start_mark)
+            if key in result:
+                raise ConstructorError(None, None, f"Duplicate YAML key {key!r}", key_node.start_mark)
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
 def load_config[ConfigType: StrictConfig](path: Path, schema: type[ConfigType]) -> ConfigType:
     """Read an explicit YAML file using the provided command schema."""
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueYamlLoader)
         return schema.model_validate(raw)
     except (OSError, UnicodeError, yaml.YAMLError, ValidationError) as error:
         raise ValueError(f"Configuration {path}: expected valid {schema.__name__} YAML: {error}") from error
