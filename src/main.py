@@ -21,15 +21,17 @@ from src.utility.pseudo_data import generate_pseudo_data, save_pseudo_data
 LOGGER = logging.getLogger(__name__)
 
 
-def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+def _parse_arguments(argv: list[str] | None = None, *, explicit: bool = False) -> argparse.Namespace:
     """Parse command line arguments for pipeline execution."""
     parser = argparse.ArgumentParser(
-        description="Generate wafer processing histories and stress measurements."
+        description="Generate wafer processing histories and stress measurements.",
+        epilog="Pipeline commands: generate, train, predict, optimize. Run COMMAND --help for its options.",
     )
     parser.add_argument(
         "--config",
         type=str,
-        default="src/config/pseudo_data_config.yaml",
+        required=explicit,
+        default=None if explicit else "src/config/pseudo_data_config.yaml",
         help="Path to pseudo-data generator YAML configuration file.",
     )
     parser.add_argument(
@@ -66,7 +68,7 @@ def _log_summary_statistics(dataframe: pd.DataFrame, output_path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> Path:
-    """Execute pseudo-data generation pipeline entrypoint.
+    """Execute an explicit pipeline stage or the legacy generator invocation.
 
     Parameters
     ----------
@@ -76,19 +78,27 @@ def main(argv: list[str] | None = None) -> Path:
     Returns
     -------
     Path
-        Path to the generated and persisted pseudo-data CSV file.
+        Path to the generated CSV or the published run directory.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parsed_args = _parse_arguments(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments and arguments[0] in {"train", "predict", "optimize"}:
+        from src.pipeline import run_command
 
-    config_path = Path(parsed_args.config).resolve()
+        return run_command(arguments, _REPO_ROOT)
+    explicit = arguments[:1] == ["generate"]
+    parsed_args = _parse_arguments(arguments[1:] if explicit else arguments, explicit=explicit)
+
+    config_path = (_REPO_ROOT / parsed_args.config).resolve() if explicit else Path(parsed_args.config).resolve()
     LOGGER.info("Loading configuration from: %s (headless=%s)", config_path, parsed_args.headless)
     configuration = load_pseudo_data_config(config_path)
 
     LOGGER.info("Starting pseudo-data generation (random_seed=%d)...", configuration.random_seed)
     generated_dataframe = generate_pseudo_data(configuration)
 
-    output_path = Path(configuration.output_path).resolve()
+    output_path = (
+        (_REPO_ROOT / configuration.output_path).resolve() if explicit else Path(configuration.output_path).resolve()
+    )
     saved_path = save_pseudo_data(generated_dataframe, output_path)
     _log_summary_statistics(generated_dataframe, saved_path)
 
