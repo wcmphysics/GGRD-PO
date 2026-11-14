@@ -1,0 +1,57 @@
+random_seed: 42
+output_path: "data/pseudo_data.csv"
+n_groups: 100
+wafers_per_group_min: 1
+wafers_per_group_max: 5
+wafer_id_prefix: "ABC"
+wafer_id_digits: 6
+total_steps_min: 3
+total_steps_max: 5
+min_depositions: 1
+max_treatments: 2
+missing_parameter_rate: 0.05
+deposition:
+  materials:
+    TiN:
+      - "TiN_recipe_v1"
+      - "TiN_recipe_v2"
+    TiAlN:
+      - "TiAlN_recipe_v1"
+    TSN:
+      - "TSN_recipe_v1"
+      - "TSN_recipe_v2"
+  time_min: 60
+  time_max: 600
+  temperature_min: 100
+  temperature_max: 1000
+  thickness_min: 1
+  thickness_max: 50
+treatment:
+  recipes:
+    anneal:
+      - "anneal_v1"
+    oxidation:
+      - "oxidation_v1"
+  time_min: 60
+  time_max: 600
+  temperature_min: 100
+  temperature_max: 1000
+transition:
+  vacuum_break_before_measure: 1
+  vacuum_break_values:
+    - 0
+    - 1
+stress_model:
+  material_constants:
+    TiN: 0.000012
+    TiAlN: 0.000008
+    TSN: -0.000015
+  treatment_constants:
+    anneal: -0.0000013
+    oxidation: 0.0000013
+  noise_std: 0.045
+  outlier_rate: 0.05
+  outlier_min_abs: 1.5
+  stress_min: -10.0
+  stress_max: 10.0
+  decimal_places: 4
