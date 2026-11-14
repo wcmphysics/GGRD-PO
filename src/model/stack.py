@@ -118,6 +118,8 @@ def predict_meta(fitted_stack: FittedStack, base_matrix: pd.DataFrame) -> NDArra
     matrix = base_matrix.to_numpy(dtype=np.float64)
     if not np.isfinite(matrix).all():
         raise ValueError("Nonfinite meta input; expected a finite prediction from every base model.")
+    if matrix.shape[1] == 1 and np.array_equal(fitted_stack.weights, [1.0]):
+        return matrix[:, 0].copy()
     if not len(matrix):
         return np.empty(0, dtype=np.float64)
     values = matrix @ fitted_stack.weights

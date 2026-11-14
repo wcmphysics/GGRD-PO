@@ -1,0 +1,32 @@
+mode: base
+active_model: random_forest
+evaluate: true
+data:
+  csv_path: data/pseudo_data.csv
+  parameter_units:
+    time: synthetic_time_unit
+    temperature: synthetic_temperature_unit
+    thickness: synthetic_thickness_unit
+  target_unit: synthetic_stress_unit
+features:
+  N_step: 4
+cv:
+  outer_folds: 5
+  outer_repeats: 5
+  inner_folds: 5  # Only used in stacked mode.
+  search_folds: 3
+  root_seed: 42
+  mape_min_abs_y: 0.0
+models:
+  - name: random_forest
+    estimator: random_forest
+    parameters: {n_estimators: 100, min_samples_leaf: 3, n_jobs: 1}
+    enable_search: false
+    search_grid: null
+meta: null
+analysis:
+  transition_ablation: false
+  convergence: true
+  convergence_every: 1
+output:
+  directory: output/train_base_demo

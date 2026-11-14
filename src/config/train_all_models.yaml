@@ -1,3 +1,6 @@
+mode: stacked
+active_model: null
+evaluate: true
 data:
   csv_path: data/pseudo_data.csv
   parameter_units:

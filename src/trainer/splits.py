@@ -38,7 +38,7 @@ class StackPlan:
     stage: str
     repeat_id: int | None
     outer_fold_id: int | None
-    inner: Partition
+    inner: Partition | None
     searches: dict[tuple[int | None, str], Partition]
 
 
@@ -52,12 +52,19 @@ class TrainingPlan:
     estimator_seeds: dict[str, int]
     distinct_outer_partitions: int
     split_settings: tuple[object, ...]
+    row_ids: tuple[str, ...]
+    group_ids: tuple[str, ...]
 
     def validate(self, batch: TrainingBatch, config: TrainConfig) -> None:
         """Check that plan reuse preserves row order and split settings."""
-        self.final_stack.inner.validate(batch)
+        self.validate_rows(batch)
         if self.split_settings != _split_settings(config):
             raise ValueError("Train settings differ from preflight; expected the original CV and model setup.")
+
+    def validate_rows(self, batch: TrainingBatch) -> None:
+        """Bind even a split-free configuration to the preflighted row order."""
+        if tuple(batch.wafer_ids) != self.row_ids or tuple(batch.groups) != self.group_ids:
+            raise ValueError("Training membership differs from preflight; expected identical wafer and group order.")
 
 
 def _seed(root_seed: int, *coordinates: int) -> int:
@@ -91,13 +98,20 @@ def _build_stack_plan(batch: TrainingBatch, config: TrainConfig, repeat: int, ou
     stage = "outer" if repeat else "final"
     context = f"{stage} repeat={repeat or None} fold={outer_fold or None}"
     root_seed = config.cv.root_seed
-    inner = _build_partition(batch, config.cv.inner_folds, _seed(root_seed, 2, repeat, outer_fold), f"{context} inner")
-    fit_positions = [(index, train) for index, (train, _) in enumerate(inner.folds, start=1)]
+    inner = None
+    fit_positions = []
+    if config.mode == "stacked":
+        inner_seed = _seed(root_seed, 2, repeat, outer_fold)
+        inner = _build_partition(batch, config.cv.inner_folds, inner_seed, f"{context} inner")
+        fit_positions.extend((index, train) for index, (train, _) in enumerate(inner.folds, start=1))
     fit_positions.append((None, np.arange(len(batch.X), dtype=np.intp)))
     searches = {}
+    active_names = {base.name for base in config.active_models}
     for inner_fold, positions in fit_positions:
         subset = batch.take_positions(positions)
         for base_position, base in enumerate(config.models):
+            if base.name not in active_names:
+                continue
             label = f"{context} inner={inner_fold} base={base.name}"
             minimum_rows = required_training_rows(base)
             _check_training_size(len(subset.X), minimum_rows, label)
@@ -113,9 +127,10 @@ def _build_stack_plan(batch: TrainingBatch, config: TrainConfig, repeat: int, ou
 def _split_settings(config: TrainConfig) -> tuple[object, ...]:
     """Extract configuration fields that determine split meaning and estimator seeds."""
     cv = config.cv
-    return (cv.outer_repeats, cv.outer_folds, cv.inner_folds, cv.search_folds, cv.root_seed,
-            tuple((base.name, base.estimator, base.enable_search, required_training_rows(base))
-                  for base in config.models))
+    active_names = {base.name for base in config.active_models}
+    return (config.mode, config.evaluate, cv.outer_repeats, cv.outer_folds, cv.inner_folds, cv.search_folds, cv.root_seed,
+            tuple((position, base.name, base.estimator, base.enable_search, required_training_rows(base))
+                  for position, base in enumerate(config.models) if base.name in active_names))
 
 
 def _check_training_size(count: int, minimum: int | None, context: str) -> None:
@@ -149,16 +164,20 @@ def preflight_training(batch: TrainingBatch, config: TrainConfig) -> TrainingPla
     _validate_training_batch(batch)
     outer = []
     stacks = {}
-    for repeat in range(1, config.cv.outer_repeats + 1):
+    repeat_count = config.cv.outer_repeats if config.evaluate else 0
+    for repeat in range(1, repeat_count + 1):
         partition = _build_partition(batch, config.cv.outer_folds, _seed(config.cv.root_seed, 1, repeat),
                                      f"outer repeat={repeat}")
         outer.append(partition)
         for fold, (training, _) in enumerate(partition.folds, start=1):
             stacks[repeat, fold] = _build_stack_plan(batch.take_positions(training), config, repeat, fold)
     final_stack = _build_stack_plan(batch, config, 0, 0)
-    estimator_seeds = {base.name: _seed(config.cv.root_seed, 4, index) for index, base in enumerate(config.models)}
+    active_names = {base.name for base in config.active_models}
+    estimator_seeds = {base.name: _seed(config.cv.root_seed, 4, index)
+                       for index, base in enumerate(config.models) if base.name in active_names}
     return TrainingPlan(tuple(outer), stacks, final_stack, estimator_seeds,
-                        len({_partition_signature(partition) for partition in outer}), _split_settings(config))
+                        len({_partition_signature(partition) for partition in outer}), _split_settings(config),
+                        tuple(batch.wafer_ids), tuple(batch.groups))
 
 
 def _records(partition: Partition, context: dict) -> Iterator[dict]:
@@ -176,12 +195,13 @@ def _records(partition: Partition, context: dict) -> Iterator[dict]:
 
 def split_records(batch: TrainingBatch, plan: TrainingPlan) -> Iterator[dict]:
     """Export every preflighted outer, inner, final and tuning partition."""
-    plan.final_stack.inner.validate(batch)
+    plan.validate_rows(batch)
     for repeat_id, outer in enumerate(plan.outer, start=1):
         yield from _records(outer, {"split_kind": "outer", "stage": "outer", "repeat_id": repeat_id})
     for stack in (*plan.outer_stacks.values(), plan.final_stack):
         context = {"stage": stack.stage, "repeat_id": stack.repeat_id, "outer_fold_id": stack.outer_fold_id}
-        yield from _records(stack.inner, dict(context, split_kind="inner"))
+        if stack.inner is not None:
+            yield from _records(stack.inner, dict(context, split_kind="inner"))
         for (inner_fold, base_name), search in stack.searches.items():
             search_id = [stack.stage, stack.repeat_id, stack.outer_fold_id, inner_fold, base_name]
             yield from _records(search, dict(context, split_kind="search", search_id=search_id))

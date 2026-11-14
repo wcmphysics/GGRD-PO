@@ -37,7 +37,7 @@ class FittedResult:
     """A stack and the fitting diagnostics that are excluded from deployment."""
 
     stack: FittedStack
-    oof: pd.DataFrame
+    oof: pd.DataFrame | None
     search_trials: list[dict]
     weights: list[dict]
     convergence: FitDiagnostics = field(default_factory=FitDiagnostics)
@@ -141,14 +141,15 @@ def _fit_fresh_base(base: ModelConfig, batch: TrainingBatch, schema: FeatureSche
 def _oof_predictions(batch: TrainingBatch, schema: FeatureSchema, config: TrainConfig,
                      context: _FitContext) -> tuple[pd.DataFrame, list[dict]]:
     """Generate exactly one out-of-fold prediction per base and training wafer."""
-    base_names = [base.name for base in config.models]
+    assert context.plan.inner is not None  # Stacked mode preflights the meta-training folds.
+    base_names = [base.name for base in config.active_models]
     values = np.full((len(batch.X), len(base_names)), np.nan)
     writes = np.zeros_like(values, dtype=int)
     searches = []
     for inner_fold, (train, holdout) in enumerate(context.plan.inner.folds, start=1):
         training = batch.take_positions(train)
         validation = batch.take_positions(holdout)
-        for base_position, base in enumerate(config.models):
+        for base_position, base in enumerate(config.active_models):
             fitted, search = _fit_fresh_base(base, training, schema, context, inner_fold)
             label = f"{context.labels()} inner_fold={inner_fold} base={base.name} OOF"
             values[holdout, base_position] = predict_base(fitted, validation.X, label)
@@ -164,26 +165,42 @@ def _oof_predictions(batch: TrainingBatch, schema: FeatureSchema, config: TrainC
 def _fit_stack(batch: TrainingBatch, schema: FeatureSchema, config: TrainConfig, context: _FitContext,
                diagnostic_holdout: TrainingBatch | None = None) -> FittedResult:
     """Fit one meta model from OOF predictions, then refit the bases on this subset."""
-    context.plan.inner.validate(batch)
-    oof, searches = _oof_predictions(batch, schema, config, context)
-    trace = [] if context.convergence_every is not None else None
-    weights = fit_weights(oof.to_numpy(), batch.y, config.meta, str(context.labels()), trace)
-    if trace is not None:
-        context.record_meta(trace)
+    oof, weights, searches = _fit_combiner(batch, schema, config, context)
+    models = config.active_models
     pipelines = []
-    for base in config.models:
+    for base in models:
         estimator, search = _fit_fresh_base(base, batch, schema, context, None)
         context.record_base(base, estimator, batch, diagnostic_holdout, None)
         pipelines.append(estimator)
         if search is not None:
             searches.append(search)
     parameters = tuple(effective_parameters(base, pipeline.named_steps["estimator"])
-                       for base, pipeline in zip(config.models, pipelines, strict=True))
-    stack = FittedStack(schema, tuple(oof.columns), tuple(pipelines), parameters, weights,
-                        config.meta.constraint_tolerance)
-    weight_records = [dict(context.labels(), model=name, weight=float(weight))
-                      for name, weight in zip(stack.base_names, weights, strict=True)]
+                       for base, pipeline in zip(models, pipelines, strict=True))
+    tolerance = np.finfo(np.float64).eps  # The identity combiner has no fitted constraint tolerance.
+    if oof is not None:
+        assert config.meta is not None
+        tolerance = config.meta.constraint_tolerance
+    stack = FittedStack(schema, tuple(base.name for base in models), tuple(pipelines), parameters, weights, tolerance)
+    weight_records = []
+    if oof is not None:
+        weight_records = [dict(context.labels(), model=name, weight=float(weight))
+                          for name, weight in zip(stack.base_names, weights, strict=True)]
     return FittedResult(stack, oof, searches, weight_records, context.diagnostics)
+
+
+def _fit_combiner(batch: TrainingBatch, schema: FeatureSchema, config: TrainConfig,
+                  context: _FitContext) -> tuple[pd.DataFrame | None, np.ndarray, list[dict]]:
+    """Use an exact identity for a single base, or learn weights from grouped OOF predictions."""
+    if config.mode == "base":
+        return None, np.ones(1), []
+    assert context.plan.inner is not None and config.meta is not None  # Validated before fitting.
+    context.plan.inner.validate(batch)
+    oof, searches = _oof_predictions(batch, schema, config, context)
+    trace = [] if context.convergence_every is not None else None
+    weights = fit_weights(oof.to_numpy(), batch.y, config.meta, str(context.labels()), trace)
+    if trace is not None:
+        context.record_meta(trace)
+    return oof, weights, searches
 
 
 def _outer_predictions(stack: FittedStack, batch: TrainingBatch, repeat: int, fold: int) -> pd.DataFrame:
@@ -191,8 +208,9 @@ def _outer_predictions(stack: FittedStack, batch: TrainingBatch, repeat: int, fo
     try:
         matrix = predict_base_matrix(stack, batch.X)
         predicted = {f"base:{name}": matrix[name].to_numpy() for name in stack.base_names}
-        predicted["equal_mean"] = matrix.to_numpy().mean(axis=1)
-        predicted["stack"] = predict_meta(stack, matrix)
+        if len(stack.base_names) > 1:
+            predicted["equal_mean"] = matrix.to_numpy().mean(axis=1)
+            predicted["stack"] = predict_meta(stack, matrix)
     except ValueError as error:
         raise ValueError(f"Outer predictions repeat={repeat} fold={fold}: {error}") from error
     reference = pd.DataFrame({"repeat_id": repeat, "outer_fold_id": fold, "row_id": batch.wafer_ids,
@@ -206,6 +224,8 @@ def evaluate_stack(batch: TrainingBatch, schema: FeatureSchema, config: TrainCon
                    plan: TrainingPlan, variant: str = "full") -> Evaluation:
     """Evaluate a feature variant on a previously validated grouped outer plan."""
     plan.validate(batch, config)
+    if not config.evaluate:
+        raise ValueError("evaluate=false; expected enabled evaluation to compute held-out predictions.")
     projected = _with_features(batch, schema)
     predictions = []
     searches = []
@@ -227,7 +247,7 @@ def evaluate_stack(batch: TrainingBatch, schema: FeatureSchema, config: TrainCon
 
 def fit_deployment(batch: TrainingBatch, schema: FeatureSchema, config: TrainConfig,
                    plan: TrainingPlan) -> FittedResult:
-    """Build a fresh final OOF matrix and refit all bases on all labeled wafers."""
+    """Fit the chosen deployment mode on all labeled wafers."""
     plan.validate(batch, config)
     interval = config.analysis.convergence_every if config.analysis.convergence else None
     context = _FitContext(plan.final_stack, "full", plan.estimator_seeds, interval)

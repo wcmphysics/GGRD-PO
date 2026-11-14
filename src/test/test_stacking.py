@@ -136,6 +136,77 @@ def test_heldout_label_isolation(train_config: TrainConfig, samples: list[WaferS
     assert not np.allclose(first_trace.query(refit).value, changed_trace.query(refit).value)
 
 
+@pytest.mark.parametrize("evaluate", [True, False])
+def test_single_base_fit_count(train_config: TrainConfig, samples: list[WaferSample],
+                               monkeypatch: pytest.MonkeyPatch, evaluate: bool) -> None:
+    """Train only the chosen model, with no inner folds or meta optimization."""
+    config = train_config
+    config.mode, config.active_model, config.evaluate = "base", "random_forest", evaluate
+    config.meta = None
+    config.analysis.transition_ablation = False
+    config.cv.inner_folds = 99
+    if not evaluate:
+        config.cv.outer_folds = 99
+    schema, batch = _fixture_batch(samples, config)
+    plan = preflight_training(batch, config)
+    fit_counts = []
+    fit_base = stacking._fit_fresh_base
+
+    def track_fit(*args: object, **kwargs: object) -> tuple:
+        """Record which configured base uses each fit call."""
+        fit_counts.append(args[0].name)
+        return fit_base(*args, **kwargs)
+
+    def unexpected_meta(*args: object, **kwargs: object) -> None:
+        """Fail if base mode attempts to fit a combiner."""
+        pytest.fail("Single-base mode called the meta solver")
+
+    monkeypatch.setattr(stacking, "_fit_fresh_base", track_fit)
+    monkeypatch.setattr(stacking, "fit_weights", unexpected_meta)
+    records = list(split_records(batch, plan))
+    if evaluate:
+        assert {record["split_kind"] for record in records} == {"outer"}
+        for record in records:
+            train_groups = {row["group_id"] for row in record["train"]}
+            assert train_groups.isdisjoint(row["group_id"] for row in record["holdout"])
+        predictions = evaluate_stack(batch, schema, config, plan).predictions
+        assert set(predictions.candidate_id) == {"base:random_forest"}
+        assert predictions.groupby(["repeat_id", "row_id"]).size().eq(1).all()
+        assert len(predictions) == len(batch.X) * config.cv.outer_repeats
+    else:
+        assert not records
+    final = fit_deployment(batch, schema, config, plan)
+    assert fit_counts == ["random_forest"] * (1 + (config.cv.outer_repeats * config.cv.outer_folds if evaluate else 0))
+    assert final.oof is None and not final.weights
+    assert final.stack.weights.tolist() == [1.0]
+
+
+def test_tuned_single_base_isolates_evaluation_holdout(train_config: TrainConfig, samples: list[WaferSample]) -> None:
+    """Tune on each evaluation training fold and keep its holdout labels out of model selection."""
+    config = train_config
+    config.mode, config.active_model, config.meta = "base", "ridge", None
+    schema, batch = _fixture_batch(samples, config)
+    plan = preflight_training(batch, config)
+    _, holdout = plan.outer[0].folds[0]
+    targets = batch.y.copy()
+    targets[holdout] += 5
+    reference = evaluate_stack(batch, schema, config, plan)
+    changed = evaluate_stack(replace(batch, y=targets), schema, config, plan)
+    assert reference.search_trials[0] == changed.search_trials[0]
+    assert reference.search_trials[0]["inner_fold_id"] is None
+    first = reference.predictions.query("outer_fold_id == 1")
+    second = changed.predictions.query("outer_fold_id == 1")
+    np.testing.assert_array_equal(first.y_pred, second.y_pred)
+    assert not np.array_equal(first.y_true, second.y_true)
+    assert np.abs(first.y_pred - first.y_true).mean() != pytest.approx(np.abs(second.y_pred - second.y_true).mean())
+    assert all(row["split_kind"] != "inner" for row in split_records(batch, plan))
+    config.evaluate = False
+    config.analysis.transition_ablation = False
+    final_plan = preflight_training(batch, config)
+    assert {row["stage"] for row in split_records(batch, final_plan)} == {"final"}
+    assert len(fit_deployment(batch, schema, config, final_plan).search_trials) == 1
+
+
 def test_convergence_preserves_fit(train_config: TrainConfig, samples: list[WaferSample]) -> None:
     """Tracing does not change predictions and includes every fit's actual final state."""
     schema, batch = _fixture_batch(samples, train_config)

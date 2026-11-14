@@ -53,3 +53,17 @@ def test_workflow_requires_enabled_stage_and_settings() -> None:
     raw["train"]["enabled"] = True
     with pytest.raises(ValidationError, match="settings file path"):
         PipelineConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(("settings", "message"), [
+    ({"mode": "base", "active_model": "missing"}, "configured model name"),
+    ({"active_model": "ridge"}, "stacked mode requires"),
+    ({"evaluate": False}, "stacked mode requires"),
+    ({"mode": "base", "active_model": "ridge", "evaluate": False}, "ablation.*requires evaluate"),
+    ({"meta": None}, "stacked mode requires"),
+])
+def test_training_mode_validation(settings: dict, message: str) -> None:
+    """Reject unusable model, evaluation, and meta settings during config validation."""
+    raw = load_config(Path("src/config/train_demo.yaml"), TrainConfig).model_dump()
+    with pytest.raises(ValidationError, match=message):
+        TrainConfig.model_validate(raw | settings)

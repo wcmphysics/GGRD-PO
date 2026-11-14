@@ -75,11 +75,14 @@ class OutputConfig(StrictConfig):
 class TrainConfig(StrictConfig):
     """Configuration of one complete evaluation and deployment run."""
 
+    mode: Literal["stacked", "base"]
+    active_model: NonemptyText | None
+    evaluate: StrictBool
     data: DataConfig
     features: FeaturesConfig
     cv: CrossValidationConfig
-    models: Annotated[list[ModelConfig], Field(min_length=2)]
-    meta: MetaConfig
+    models: Annotated[list[ModelConfig], Field(min_length=1)]
+    meta: MetaConfig | None
     analysis: AnalysisConfig
     output: OutputConfig
 
@@ -90,6 +93,29 @@ class TrainConfig(StrictConfig):
         if len(set(names)) != len(names):
             raise ValueError(f"base model names={names!r}, expected unique names")
         return self
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "TrainConfig":
+        """Check model selection and evaluation requirements for the chosen mode."""
+        if self.mode == "stacked":
+            if len(self.models) < 2 or self.active_model is not None or not self.evaluate or self.meta is None:
+                raise ValueError("stacked mode requires at least two models, active_model: null, evaluate: true, "
+                                 "and meta settings")
+        elif self.active_model not in {base.name for base in self.models}:
+            raise ValueError(f"active_model={self.active_model!r}; expected a configured model name in base mode")
+        if self.analysis.transition_ablation and not self.evaluate:
+            raise ValueError("transition_ablation: true requires evaluate: true")
+        return self
+
+    @property
+    def active_models(self) -> tuple[ModelConfig, ...]:
+        """Return only model entries participating in this run, in configured order."""
+        return tuple(base for base in self.models if self.mode == "stacked" or base.name == self.active_model)
+
+    @property
+    def primary_candidate(self) -> str:
+        """Return the held-out series used by the parity and ablation reports."""
+        return "stack" if self.mode == "stacked" else f"base:{self.active_model}"
 
 
 class PredictConfig(StrictConfig):

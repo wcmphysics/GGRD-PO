@@ -62,6 +62,8 @@ def _validate_stack(bundle: DeploymentBundle) -> None:
     if (weights.shape != (count,) or not np.isfinite(weights).all() or (weights < 0).any()
             or not np.isfinite(tolerance) or tolerance <= 0 or abs(weights.sum() - 1) > tolerance):
         raise ValueError(f"Invalid weights {weights}; expected {count} finite nonnegative weights summing to one.")
+    if count == 1 and weights[0] != 1.0:
+        raise ValueError(f"Invalid single-base weight {weights[0]}; expected exactly 1 for pass-through prediction.")
     for name, pipeline in zip(stack.base_names, stack.pipelines, strict=True):
         check_is_fitted(pipeline)
         if tuple(pipeline.feature_names_in_) != bundle.schema.columns:
