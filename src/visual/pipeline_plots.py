@@ -5,9 +5,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
 
@@ -43,17 +45,34 @@ def _plot_exploration(run: Path, figures: Path, pyplot: ModuleType) -> None:
     _save(figure, pyplot, figures / "exploration.png")
 
 
+def _parity_limits(lower: float, upper: float) -> tuple[float, float]:
+    """Give a constant-value plot usable bounds and pad nonconstant ranges."""
+    margin = 0.05 * (upper - lower) if upper > lower else 0.05 * max(abs(lower), 1.0)
+    return lower - margin, upper + margin
+
+
+def _draw_parity(axis: "Axes", stack: pd.DataFrame, limits: tuple[float, float], title: str) -> None:
+    """Draw all rows on shared measured and predicted scales."""
+    axis.scatter(stack.y_true, stack.y_pred, alpha=0.65, s=17)
+    axis.plot(limits, limits, linestyle="--", color="0.4")
+    axis.set(xlabel="Measured stress", ylabel="Predicted stress", xlim=limits, ylim=limits, title=title)
+    axis.set_aspect("equal", adjustable="box")
+
+
 def _plot_parity(run: Path, figures: Path, pyplot: ModuleType) -> None:
-    """Compare held-out measurements and predictions for the first repeat."""
+    """Show the full held-out range and a central view at equal scales."""
     predictions = pd.read_csv(run / "outer_predictions.csv")
     first_repeat = predictions.repeat_id.min()
     stack = predictions.loc[(predictions.repeat_id == first_repeat) & (predictions.candidate_id == "stack")]
-    lower = min(stack.y_true.min(), stack.y_pred.min())
-    upper = max(stack.y_true.max(), stack.y_pred.max())
-    figure, axis = pyplot.subplots()
-    axis.scatter(stack.y_true, stack.y_pred, alpha=0.7)
-    axis.plot([lower, upper], [lower, upper], linestyle="--", color="0.4")
-    axis.set(xlabel="Measured stress", ylabel="Predicted stress", title=f"Held-out wafers, repeat {first_repeat}")
+    pooled = stack[["y_true", "y_pred"]].to_numpy().ravel()
+    central_lower, central_upper = np.quantile(pooled, [0.05, 0.95])
+    central = _parity_limits(central_lower, central_upper)
+    inside = stack.y_true.between(*central) & stack.y_pred.between(*central)
+    figure, axes = pyplot.subplots(1, 2, figsize=(9, 4.5))
+    _draw_parity(axes[0], stack, _parity_limits(pooled.min(), pooled.max()), f"Full range ({len(stack)} wafers)")
+    _draw_parity(axes[1], stack, central, f"Central view ({inside.sum()} of {len(stack)} wafers)")
+    axes[1].text(0.03, 0.97, "Pooled 5th–95th percentiles, padded", transform=axes[1].transAxes, va="top")
+    figure.suptitle(f"Held-out wafers, repeat {first_repeat}")
     _save(figure, pyplot, figures / "held_out_parity.png")
 
 
