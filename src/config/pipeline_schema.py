@@ -18,6 +18,7 @@ from src.config.pipeline_common import (
     StrictConfig,
 )
 from src.optimize.settings import ObjectiveConfig, SearchConfig, SearchDomain, SupportConfig
+from src.config.pseudo_data_schema import PseudoDataConfig
 
 FoldCount = Annotated[int, Field(strict=True, ge=2)]
 AlphaGrid = Annotated[list[NonnegativeNumber], Field(min_length=1)]
@@ -184,6 +185,36 @@ class OptimizeConfig(StrictConfig):
     output: OutputConfig
 
 
+class StageConfig(StrictConfig):
+    """Stage toggle and path to its typed settings."""
+
+    enabled: StrictBool
+    config: Path | None
+
+    @model_validator(mode="after")
+    def require_path(self) -> "StageConfig":
+        """Require a settings file for an enabled stage."""
+        if self.enabled and self.config is None:
+            raise ValueError("enabled=true with config=null; expected a settings file path for the enabled stage")
+        return self
+
+
+class PipelineConfig(StrictConfig):
+    """Control which stages main runs in workflow order."""
+
+    generate: StageConfig
+    train: StageConfig
+    predict: StageConfig
+    optimize: StageConfig
+
+    @model_validator(mode="after")
+    def require_stage(self) -> "PipelineConfig":
+        """Reject a configuration that would produce no output."""
+        if not any(stage.enabled for stage in (self.generate, self.train, self.predict, self.optimize)):
+            raise ValueError("all stages disabled; expected at least one enabled stage")
+        return self
+
+
 class _UniqueYamlLoader(yaml.SafeLoader):
     """Reject duplicate keys before Pydantic validates the decoded data."""
 
@@ -202,10 +233,30 @@ class _UniqueYamlLoader(yaml.SafeLoader):
         return result
 
 
+def _read_yaml(path: Path) -> object:
+    """Read YAML with source context and no duplicate keys."""
+    try:
+        return yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueYamlLoader)
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise ValueError(f"Configuration {path}: expected readable YAML: {error}") from error
+
+
 def load_config[ConfigType: StrictConfig](path: Path, schema: type[ConfigType]) -> ConfigType:
     """Read an explicit YAML file using the provided command schema."""
     try:
-        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueYamlLoader)
+        return schema.model_validate(_read_yaml(path))
+    except ValidationError as error:
+        raise ValueError(f"Configuration {path}: expected valid {schema.__name__} YAML: {error}") from error
+
+
+def load_entry_config(path: Path) -> PipelineConfig | PseudoDataConfig:
+    """Validate a workflow file or an existing generator-only YAML file."""
+    raw = _read_yaml(path)
+    legacy_keys = {"n_groups", "wafer_id_prefix", "stress_model"}
+    workflow_keys = {"generate", "train", "predict", "optimize"}
+    legacy = isinstance(raw, dict) and bool(legacy_keys.intersection(raw)) and not workflow_keys.intersection(raw)
+    schema = PseudoDataConfig if legacy else PipelineConfig
+    try:
         return schema.model_validate(raw)
-    except (OSError, UnicodeError, yaml.YAMLError, ValidationError) as error:
+    except ValidationError as error:
         raise ValueError(f"Configuration {path}: expected valid {schema.__name__} YAML: {error}") from error

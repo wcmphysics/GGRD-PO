@@ -5,13 +5,15 @@ from pathlib import Path
 from pydantic import ValidationError
 import pytest
 
-from src.config.pipeline_schema import PredictConfig, TrainConfig, load_config
+from src.config.pipeline_schema import PipelineConfig, PredictConfig, TrainConfig, load_config
 
 
 def test_demo_configs() -> None:
     """The committed train and predict YAML files validate independently."""
-    train = load_config(Path("src/config/config.yaml"), TrainConfig)
-    predict = load_config(Path("src/config/predict_demo.yaml"), PredictConfig)
+    workflow = load_config(Path("src/config/config.yaml"), PipelineConfig)
+    train = load_config(workflow.train.config, TrainConfig)
+    predict = load_config(workflow.predict.config, PredictConfig)
+    assert workflow.train.enabled
     assert train.output.directory / "model" == predict.bundle_directory
     assert predict.request_path.is_file()
 
@@ -19,7 +21,7 @@ def test_demo_configs() -> None:
 @pytest.mark.parametrize("invalid", ["missing", "duplicate", "grid", "unknown", "coercion"])
 def test_validation_errors(invalid: str) -> None:
     """A malformed model policy or incomplete config fails validation."""
-    raw = load_config(Path("src/config/config.yaml"), TrainConfig).model_dump()
+    raw = load_config(Path("src/config/train_demo.yaml"), TrainConfig).model_dump()
     if invalid == "missing":
         del raw["cv"]["outer_folds"]
     elif invalid == "duplicate":
@@ -40,3 +42,13 @@ def test_duplicate_yaml_key(tmp_path: Path) -> None:
     path.write_text("features:\n  N_step: 4\n  N_step: 2\n", encoding="utf-8")
     with pytest.raises(ValueError, match="Duplicate YAML key 'N_step'"):
         load_config(path, TrainConfig)
+
+
+def test_workflow_requires_enabled_stage_and_settings() -> None:
+    """Reject a no-op workflow and an enabled stage with no settings file."""
+    raw = {name: {"enabled": False, "config": None} for name in ("generate", "train", "predict", "optimize")}
+    with pytest.raises(ValidationError, match="all stages disabled"):
+        PipelineConfig.model_validate(raw)
+    raw["train"]["enabled"] = True
+    with pytest.raises(ValidationError, match="settings file path"):
+        PipelineConfig.model_validate(raw)

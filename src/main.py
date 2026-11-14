@@ -1,10 +1,13 @@
 """End-to-end pipeline entrypoint for wafer processing histories and stress prediction.
 
 Usage:
-    .\\.venv\\Scripts\\python.exe src/main.py [--config <path>] [--headless]
+    .\\.venv\\Scripts\\python.exe src/main.py --config src/config/config.yaml --headless
 """
 
 import argparse
+from collections.abc import Callable
+import csv
+import json
 import logging
 from pathlib import Path
 import sys
@@ -15,24 +18,46 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import pandas as pd
-from src.config.pseudo_data_schema import load_pseudo_data_config
+import numpy as np
+
+from src.analysis.ablation import write_transition_ablation
+from src.analysis.exploration import write_exploration
+from src.config.pipeline_schema import (
+    OptimizeConfig,
+    PipelineConfig,
+    PredictConfig,
+    SyntheticDomainConfig,
+    TrainConfig,
+    load_config,
+    load_entry_config,
+)
+from src.config.pseudo_data_schema import PseudoDataConfig, load_pseudo_data_config
+from src.dataset.contracts import ProcessSequence, WaferSample
+from src.dataset.history import read_history
+from src.dataset.requests import read_requests
+from src.feature.wide import FeatureSchema, build_training_batch
+from src.inference.bundle import DeploymentBundle, load_bundle, save_bundle
+from src.inference.predict import predict_sequences
+from src.optimize.domain import synthetic_domain
+from src.optimize.search import SearchContext, optimize_sequences
+from src.trainer.reporting import training_manifest, write_evaluation, write_trace_reports
+from src.trainer.splits import preflight_training, split_records
+from src.trainer.stacking import evaluate_stack, fit_deployment
 from src.utility.pseudo_data import generate_pseudo_data, save_pseudo_data
+from src.utility.run_output import file_fingerprint, stage_output, write_json
+from src.visual.pipeline_plots import plot_optimization, plot_training
 
 LOGGER = logging.getLogger(__name__)
 
 
-def _parse_arguments(argv: list[str] | None = None, *, explicit: bool = False) -> argparse.Namespace:
-    """Parse command line arguments for pipeline execution."""
-    parser = argparse.ArgumentParser(
-        description="Generate wafer processing histories and stress measurements.",
-        epilog="Pipeline commands: generate, train, predict, optimize. Run COMMAND --help for its options.",
-    )
+def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """Accept the workflow YAML and the rendering option."""
+    parser = argparse.ArgumentParser(description="Run the wafer pipeline stages enabled in the configuration.")
     parser.add_argument(
         "--config",
-        type=str,
-        required=explicit,
-        default=None if explicit else "src/config/pseudo_data_config.yaml",
-        help="Path to pseudo-data generator YAML configuration file.",
+        type=Path,
+        default=Path("src/config/config.yaml"),
+        help="Workflow YAML (default: src/config/config.yaml). A generator-only YAML also works.",
     )
     parser.add_argument(
         "--headless",
@@ -67,42 +92,179 @@ def _log_summary_statistics(dataframe: pd.DataFrame, output_path: Path) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> Path:
-    """Execute an explicit pipeline stage or the legacy generator invocation.
-
-    Parameters
-    ----------
-    argv : list[str] | None, optional
-        Command line arguments, defaults to sys.argv[1:].
-
-    Returns
-    -------
-    Path
-        Path to the generated CSV or the published run directory.
-    """
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    arguments = sys.argv[1:] if argv is None else argv
-    if arguments and arguments[0] in {"train", "predict", "optimize"}:
-        from src.pipeline import run_command
-
-        return run_command(arguments, _REPO_ROOT)
-    explicit = arguments[:1] == ["generate"]
-    parsed_args = _parse_arguments(arguments[1:] if explicit else arguments, explicit=explicit)
-
-    config_path = (_REPO_ROOT / parsed_args.config).resolve() if explicit else Path(parsed_args.config).resolve()
-    LOGGER.info("Loading configuration from: %s (headless=%s)", config_path, parsed_args.headless)
-    configuration = load_pseudo_data_config(config_path)
-
+def _generate(configuration: PseudoDataConfig, root: Path) -> Path:
+    """Generate a CSV using the selected pseudo-data settings."""
     LOGGER.info("Starting pseudo-data generation (random_seed=%d)...", configuration.random_seed)
     generated_dataframe = generate_pseudo_data(configuration)
-
-    output_path = (
-        (_REPO_ROOT / configuration.output_path).resolve() if explicit else Path(configuration.output_path).resolve()
-    )
+    output_path = (root / configuration.output_path).resolve()
     saved_path = save_pseudo_data(generated_dataframe, output_path)
     _log_summary_statistics(generated_dataframe, saved_path)
 
     return saved_path
+
+
+def _generate_stage(config_path: Path, root: Path, _headless: bool) -> Path:
+    """Load the enabled generation stage and write its CSV."""
+    return _generate(load_pseudo_data_config(config_path), root)
+
+
+def _record_count(path: Path) -> int:
+    """Count CSV records without counting embedded line endings as records."""
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        return sum(bool(row) for row in csv.reader(source)) - 1
+
+
+def _group_references(samples: tuple[WaferSample, ...]) -> dict[str, ProcessSequence]:
+    """Keep one already validated, unimputed history per group."""
+    groups = {sample.group: sample.sequence for sample in samples}
+    return dict(sorted(groups.items()))
+
+
+def _train(config_path: Path, root: Path, headless: bool) -> Path:
+    """Evaluate grouped stacks, fit deployment, and publish their artifacts together."""
+    config_hash = file_fingerprint(config_path)
+    config = load_config(config_path, TrainConfig)
+    if file_fingerprint(config_path) != config_hash:
+        raise ValueError(f"Configuration {config_path} changed while reading it. Expected stable settings.")
+    destination = root / config.output.directory
+    source = root / config.data.csv_path
+    with stage_output(destination) as output:
+        # Canonical data and all nested group plans exist before any estimator sees a row.
+        hashes = {"source_csv": file_fingerprint(source), "train_config": config_hash}
+        samples = read_history(source)
+        schema = FeatureSchema(config.features.N_step)
+        batch = build_training_batch(samples, schema)
+        plan = preflight_training(batch, config)
+        write_exploration(samples, _record_count(source), output / "exploration")
+        if file_fingerprint(source) != hashes["source_csv"]:
+            raise ValueError(f"Wafer history {source} changed while reading it. Expected a stable training input.")
+
+        # Outer evaluation and ablation reuse one plan. Final training uses its separate plan.
+        full = evaluate_stack(batch, schema, config, plan)
+        evaluations = [full]
+        write_evaluation(full, output, config.cv.mape_min_abs_y)
+        if config.analysis.transition_ablation:
+            ablated = evaluate_stack(batch, schema.without_transitions(), config, plan, variant="transition_ablation")
+            write_transition_ablation(full.predictions, ablated.predictions, output / "analysis")
+            evaluations.append(ablated)
+        final = fit_deployment(batch, schema, config, plan)
+        manifest = training_manifest(batch, schema, config, plan, hashes)
+        write_trace_reports(output, split_records(batch, plan), evaluations, final, manifest)
+        bundle = DeploymentBundle(
+            stack=final.stack, schema=schema, references=_group_references(samples),
+            config=config.model_dump(mode="json"), source_fingerprint=hashes["source_csv"],
+            target_unit=config.data.target_unit, parameter_units=config.data.parameter_units.model_dump(),
+        )
+        save_bundle(bundle, output / "model")
+        plot_training(output, headless)
+    return destination
+
+
+def _predict(config_path: Path, root: Path, _headless: bool) -> Path:
+    """Read ordered, unlabeled requests and write their stress predictions."""
+    config = load_config(config_path, PredictConfig)
+    destination = root / config.output.directory
+    with stage_output(destination) as output:
+        bundle = load_bundle(root / config.bundle_directory)
+        requests = read_requests(root / config.request_path)
+        result = predict_sequences(bundle, tuple(request.sequence for request in requests))
+        pd.DataFrame({
+            "request_id": [request.request_id for request in requests],
+            "predicted_stress": result.values,
+            "target_unit": bundle.target_unit,
+        }).to_csv(output / "predictions.csv", index=False)
+    return destination
+
+
+def _optimize(config_path: Path, root: Path, headless: bool) -> Path:
+    """Search legal sequences using one loaded predictor and publish a trial ledger."""
+    config = load_config(config_path, OptimizeConfig)
+    bundle_dir = root / config.bundle_directory
+    destination = root / config.output.directory
+    with stage_output(destination) as output:
+        # Adapt the recipe catalog and validate units before constructing a search context.
+        bundle_file = bundle_dir / "bundle.joblib"
+        bundle_hash = file_fingerprint(bundle_file)
+        bundle = load_bundle(bundle_dir)
+        if file_fingerprint(bundle_file) != bundle_hash:
+            raise ValueError(f"Model at {bundle_file} changed while loading. Expected a stable deployment bundle.")
+        generator = None
+        domain = config.domain
+        if isinstance(domain, SyntheticDomainConfig):
+            generator = load_pseudo_data_config(root / domain.generator_config_path)
+            domain = synthetic_domain(generator, domain.parameter_units)
+        if domain.parameter_units.model_dump() != bundle.parameter_units:
+            raise ValueError(
+                f"Search domain units {domain.parameter_units}; expected bundle units {bundle.parameter_units}"
+            )
+        context = SearchContext(bundle.schema.N_step, bundle.target_unit, bundle.stack.base_names,
+                                bundle_hash, bundle.references)
+        result = optimize_sequences(domain, config, _bind_predictor(bundle), context)
+
+        # Persist scored trials first so reporting reflects the exact search order and ranking.
+        with (output / "optimization_trials.jsonl").open("w", encoding="utf-8") as stream:
+            for trial in result.trials:
+                stream.write(json.dumps(trial, allow_nan=False) + "\n")
+        write_json(output / "optimization.json", result.summary)
+        _write_rank_table(result.summary, output)
+        if generator is not None:
+            from src.analysis.synthetic_audit import audit_latent_results
+
+            write_json(output / "synthetic_audit.json", audit_latent_results(result.summary, generator))
+        plot_optimization(output, headless)
+    return destination
+
+
+def _bind_predictor(bundle: DeploymentBundle) -> Callable[[tuple[ProcessSequence, ...]], tuple[np.ndarray, np.ndarray]]:
+    """Adapt shared bundle inference to the optimizer's batched predictor interface."""
+    def predict(sequences: tuple[ProcessSequence, ...]) -> tuple[np.ndarray, np.ndarray]:
+        """Use one shared feature transform and expose the ordered base predictions."""
+        result = predict_sequences(bundle, sequences)
+        return result.values, result.base.to_numpy()
+
+    return predict
+
+
+def _write_rank_table(summary: dict, output: Path) -> None:
+    """Provide a small tabular summary linked to complete trial records."""
+    columns = ["rank", "trial_index", "predicted_stress", "target_stress", "objective", "base_range"]
+    ranked = pd.DataFrame(summary["ranked_results"])
+    ranked[columns].to_csv(output / "ranked_candidates.csv", index=False)
+
+
+def _run_stages(config: PipelineConfig, headless: bool) -> Path:
+    """Run enabled stages in dependency order and return the last result."""
+    stages = (
+        ("generate", config.generate, _generate_stage),
+        ("train", config.train, _train),
+        ("predict", config.predict, _predict),
+        ("optimize", config.optimize, _optimize),
+    )
+    outputs: list[Path] = []
+    for name, settings, run in stages:
+        if not settings.enabled:
+            continue
+        assert settings.config is not None  # Validated by StageConfig.
+        try:
+            output = run(_REPO_ROOT / settings.config, _REPO_ROOT, headless)
+        except (OSError, RuntimeError, ValueError) as error:
+            LOGGER.error("%s failed: %s", name, error)
+            raise
+        LOGGER.info("Published %s outputs to %s", name, output)
+        outputs.append(output)
+    return outputs[-1]
+
+
+def main(argv: list[str] | None = None) -> Path:
+    """Load the workflow configuration and run its enabled stages."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    options = _parse_arguments(argv)
+    config_path = (_REPO_ROOT / options.config).resolve()
+    LOGGER.info("Loading configuration from %s (headless=%s)", config_path, options.headless)
+    config = load_entry_config(config_path)
+    if isinstance(config, PseudoDataConfig):
+        return _generate(config, Path.cwd())
+    return _run_stages(config, options.headless)
 
 
 if __name__ == "__main__":

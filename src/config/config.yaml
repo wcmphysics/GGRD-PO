@@ -1,40 +1,15 @@
-data:
-  csv_path: data/pseudo_data.csv
-  parameter_units:
-    time: synthetic_time_unit
-    temperature: synthetic_temperature_unit
-    thickness: synthetic_thickness_unit
-  target_unit: synthetic_stress_unit
-features:
-  N_step: 4
-cv:
-  outer_folds: 5
-  outer_repeats: 5
-  inner_folds: 5
-  search_folds: 3
-  root_seed: 42
-  mape_min_abs_y: 0.0
-models:
-  - name: ridge
-    estimator: ridge
-    parameters:
-      alpha: 1.0
-    enable_search: false
-    search_grid: null
-  - name: random_forest
-    estimator: random_forest
-    parameters:
-      n_estimators: 100
-      min_samples_leaf: 3
-      n_jobs: 1
-    enable_search: false
-    search_grid: null
-meta:
-  alpha: 0.01
-  max_iterations: 500
-  solver_tolerance: 1.0e-9
-  constraint_tolerance: 1.0e-8
-analysis:
-  transition_ablation: true
-output:
-  directory: output/train_demo
+# Stages run in this order. Enable any combination that has the required input files.
+# Paths are relative to the repository root. Predict and optimize may reuse an existing bundle.
+# Train-only expects data/pseudo_data.csv. Enable generate for a fresh synthetic demo.
+generate:
+  enabled: false
+  config: src/config/pseudo_data_config.yaml
+train:
+  enabled: true
+  config: src/config/train_demo.yaml
+predict:
+  enabled: false
+  config: src/config/predict_demo.yaml
+optimize:
+  enabled: false
+  config: src/config/optimize_free_demo.yaml  # Or src/config/optimize_fixed_demo.yaml.

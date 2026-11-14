@@ -25,7 +25,7 @@ from src.trainer.stacking import Evaluation, evaluate_stack, fit_deployment
 @pytest.fixture
 def train_config() -> TrainConfig:
     """Use the demo schema with small enabled search and forest budgets."""
-    config = load_config(Path("src/config/config.yaml"), TrainConfig)
+    config = load_config(Path("src/config/train_demo.yaml"), TrainConfig)
     config.cv.outer_folds = 2
     config.cv.inner_folds = 2
     config.cv.outer_repeats = 1

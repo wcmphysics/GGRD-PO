@@ -15,16 +15,22 @@ def _demo_settings(name: str) -> dict:
     return yaml.safe_load((Path("src/config") / name).read_text(encoding="utf-8"))
 
 
-def _run(stage: str, settings: dict, destination: Path) -> Path:
-    """Run an actual stage dispatch against a temporary YAML file."""
-    settings_path = destination / f"{stage}.yaml"
-    settings_path.write_text(yaml.safe_dump(settings), encoding="utf-8")
-    return main([stage, "--config", str(settings_path), "--headless"])
+def _run(destination: Path, **enabled: dict) -> Path:
+    """Run the enabled stages through one workflow YAML."""
+    workflow = {}
+    for name in ("generate", "train", "predict", "optimize"):
+        settings_path = destination / f"{name}.yaml"
+        if name in enabled:
+            settings_path.write_text(yaml.safe_dump(enabled[name]), encoding="utf-8")
+        workflow[name] = {"enabled": name in enabled, "config": str(settings_path)}
+    entry_path = destination / "workflow.yaml"
+    entry_path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    return main(["--config", str(entry_path), "--headless"])
 
 
 def _training_settings(source: Path, output: Path) -> dict:
     """Prepare a small grouped job that enables both tuning and ablation."""
-    settings = _demo_settings("config.yaml")
+    settings = _demo_settings("train_demo.yaml")
     settings["data"]["csv_path"] = str(source)
     settings["cv"].update(outer_folds=2, outer_repeats=2, inner_folds=2, search_folds=2)
     settings["models"][0].update(enable_search=True, search_grid={"alpha": [0.1, 1.0, 10.0]})
@@ -33,13 +39,17 @@ def _training_settings(source: Path, output: Path) -> dict:
     return settings
 
 
-def _verify_search(mode: str, model: Path, root: Path) -> None:
-    """Recompute fixed/free results from the persisted trial ledger."""
+def _search_settings(mode: str, model: Path, output: Path) -> dict:
+    """Build settings for a short search in the requested mode."""
     settings = _demo_settings(f"optimize_{mode}_demo.yaml")
     settings["bundle_directory"] = str(model)
-    settings["output"]["directory"] = str(root / mode)
+    settings["output"]["directory"] = str(output)
     settings["search"].update(max_candidates=12, max_attempts=60, batch_size=5)
-    run = _run("optimize", settings, root)
+    return settings
+
+
+def _verify_search(run: Path) -> None:
+    """Recompute fixed/free results from the persisted trial ledger."""
     summary = json.loads((run / "optimization.json").read_text(encoding="utf-8"))
     ledger = pd.read_json(run / "optimization_trials.jsonl", lines=True, precise_float=True)
     assert summary["scored"] == len(ledger) == 12
@@ -52,25 +62,26 @@ def _verify_search(mode: str, model: Path, root: Path) -> None:
 def test_end_to_end(tmp_path: Path) -> None:
     """Generate, train with tuning and ablation, reload, predict, and run both search modes."""
     generator = _demo_settings("pseudo_data_config.yaml")
-    generator.update(n_groups=16, output_path=str(tmp_path / "history.csv"))
-    source = _run("generate", generator, tmp_path)
-    train = _run("train", _training_settings(source, tmp_path / "train"), tmp_path)
+    source, train, predicted = (tmp_path / name for name in ("history.csv", "train", "predict"))
+    generator.update(n_groups=16, output_path=str(source))
+    model = train / "model"
+    predict = _demo_settings("predict_demo.yaml")
+    predict.update(bundle_directory=str(model), output={"directory": str(predicted)})
+    fixed = _search_settings("fixed", model, tmp_path / "fixed")
+    result = _run(tmp_path, generate=generator, train=_training_settings(source, train), predict=predict, optimize=fixed)
+    assert result == tmp_path / "fixed"
     metrics = pd.read_csv(train / "repeat_metrics.csv")
     assert set(metrics.candidate_id) == {"base:ridge", "base:random_forest", "equal_mean", "stack"}
     assert len(metrics) == 8
     assert (train / "search_trials.jsonl").is_file()
     assert (train / "figures" / "transition_ablation.png").is_file()
-    model = train / "model"
-    predict = _demo_settings("predict_demo.yaml")
-    predict.update(bundle_directory=str(model), output={"directory": str(tmp_path / "predict")})
-    predicted = _run("predict", predict, tmp_path)
     table = pd.read_csv(predicted / "predictions.csv")
     assert table.request_id.tolist() == ["synthetic-example"]
     assert table.predicted_stress.notna().all()
-    _verify_search("fixed", model, tmp_path)
-    _verify_search("free", model, tmp_path)
+    _verify_search(result)
+    _verify_search(_run(tmp_path, optimize=_search_settings("free", model, tmp_path / "free")))
     with pytest.raises(FileExistsError, match="fresh directory"):
-        _run("predict", predict, tmp_path)
+        _run(tmp_path, predict=predict)
 
 
 def test_failed_stage_is_not_published(tmp_path: Path) -> None:
@@ -78,6 +89,6 @@ def test_failed_stage_is_not_published(tmp_path: Path) -> None:
     destination = tmp_path / "failed"
     settings = _training_settings(tmp_path / "absent.csv", destination)
     with pytest.raises(FileNotFoundError):
-        _run("train", settings, tmp_path)
+        _run(tmp_path, train=settings)
     assert not destination.exists()
     assert not list(tmp_path.glob(".failed.stage-*"))
