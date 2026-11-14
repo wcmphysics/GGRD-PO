@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Agent orchestration & generated pseudo-data
+.agents/
+data/pseudo_data.csv
