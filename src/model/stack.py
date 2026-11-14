@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 from scipy.optimize import minimize
-from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 
-from src.config.pipeline_schema import ForestConfig, MetaConfig, RidgeConfig
+from src.config.pipeline_schema import MetaConfig, ModelConfig
 from src.feature.preprocess import make_preprocessor
 from src.feature.wide import FeatureSchema
+from src.model.base_estimator import make_estimator, uses_numeric_scaling
 
 
 @dataclass(frozen=True)
@@ -26,17 +26,10 @@ class FittedStack:
     constraint_tolerance: float
 
 
-def make_pipeline(base: RidgeConfig | ForestConfig, schema: FeatureSchema, seed: int) -> Pipeline:
+def make_pipeline(base: ModelConfig, schema: FeatureSchema, seed: int) -> Pipeline:
     """Construct one new preprocessing and base estimator pipeline."""
-    parameters = base.parameters.model_dump()
-    if base.estimator == "ridge":
-        estimator = Ridge(**parameters, random_state=seed)
-    else:
-        from sklearn.ensemble import RandomForestRegressor
-
-        estimator = RandomForestRegressor(**parameters, random_state=seed)
-    return Pipeline([("features", make_preprocessor(schema, scale_numeric=base.estimator == "ridge")),
-                     ("estimator", estimator)])
+    return Pipeline([("features", make_preprocessor(schema, scale_numeric=uses_numeric_scaling(base))),
+                     ("estimator", make_estimator(base, seed))])
 
 
 def _feasible(weights: NDArray[np.float64], tolerance: float) -> bool:
@@ -47,7 +40,7 @@ def _feasible(weights: NDArray[np.float64], tolerance: float) -> bool:
 
 
 def fit_weights(oof: NDArray[np.float64], targets: NDArray[np.float64], config: MetaConfig,
-                context: str) -> NDArray[np.float64]:
+                context: str, trace: list[float] | None = None) -> NDArray[np.float64]:
     """Minimize original-unit squared error with regularized simplex weights."""
     if oof.ndim != 2 or targets.shape != (len(oof),) or not oof.shape[1] or not len(oof):
         raise ValueError(f"{context}: invalid meta dimensions {oof.shape}, {targets.shape}; expected aligned OOF rows.")
@@ -71,9 +64,19 @@ def fit_weights(oof: NDArray[np.float64], targets: NDArray[np.float64], config: 
         return np.ones_like(weights)
 
     initial = np.full(oof.shape[1], 1 / oof.shape[1])
+    callback = None
+    if trace is not None:
+        trace.append(objective(initial))
+
+        def record_iterate(weights: NDArray[np.float64]) -> None:
+            """Record the true objective at each major SLSQP iteration."""
+            trace.append(objective(weights))
+
+        callback = record_iterate
+    # Solve against OOF predictions only. Outer holdout data never enters this call.
     result = minimize(objective, initial, method="SLSQP", jac=gradient, bounds=[(0, 1)] * len(initial),
                       constraints={"type": "eq", "fun": sum_constraint, "jac": sum_gradient},
-                      options={"ftol": config.solver_tolerance, "maxiter": config.max_iterations})
+                      options={"ftol": config.solver_tolerance, "maxiter": config.max_iterations}, callback=callback)
     tolerance = config.constraint_tolerance
     if not result.success or not _feasible(result.x, tolerance) or not np.isfinite(result.fun):
         raise ValueError(f"{context}: meta solver returned {result.message}, {result.x}; expected a feasible solution.")

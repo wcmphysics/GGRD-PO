@@ -45,6 +45,7 @@ from src.trainer.splits import preflight_training, split_records
 from src.trainer.stacking import evaluate_stack, fit_deployment
 from src.utility.pseudo_data import generate_pseudo_data, save_pseudo_data
 from src.utility.run_output import file_fingerprint, stage_output, write_json
+from src.visual.convergence import plot_convergence
 from src.visual.pipeline_plots import plot_optimization, plot_training
 
 LOGGER = logging.getLogger(__name__)
@@ -157,6 +158,8 @@ def _train(config_path: Path, root: Path, headless: bool) -> Path:
         )
         save_bundle(bundle, output / "model")
         plot_training(output, headless)
+        if config.analysis.convergence:
+            plot_convergence(output, headless)
     return destination
 
 

@@ -8,3 +8,6 @@ PyYAML==6.0.3
 scikit-learn==1.9.1
 scipy==1.18.1
 pytest==9.2.0
+catboost==1.2.10
+lightgbm==4.7.0
+xgboost==3.4.1

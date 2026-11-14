@@ -106,6 +106,7 @@ def training_manifest(batch: TrainingBatch, schema: FeatureSchema, config: Train
                       plan: TrainingPlan, input_hashes: dict[str, str]) -> dict:
     """Describe inputs, effective settings, feature ordering, and runtime provenance."""
     packages = ("numpy", "pandas", "scipy", "scikit-learn", "joblib", "pydantic", "PyYAML", "matplotlib", "pytest")
+    packages += tuple(sorted({base.estimator for base in config.models} & {"lightgbm", "catboost", "xgboost"}))
     runtime = {"python": platform.python_version(), "packages": {package: version(package) for package in packages}}
     return {"input_hashes": input_hashes, "settings": config.model_dump(mode="json"), "runtime": runtime,
             "base_order": [base.name for base in config.models], "features": list(zip(schema.columns, schema.dtypes)),
@@ -134,3 +135,8 @@ def write_trace_reports(destination: Path, splits: Iterable[dict], evaluations: 
     analysis.mkdir(exist_ok=True)
     weights = pd.DataFrame([row for result in all_results for row in result.weights])
     weights.to_csv(analysis / "meta_weights.csv", index=False)
+    fits = [fit for result in all_results for fit in result.convergence.fits]
+    if fits:
+        points = [point for result in all_results for point in result.convergence.points]
+        pd.DataFrame(fits).to_csv(analysis / "convergence_fits.csv", index=False)
+        pd.DataFrame(points).to_csv(analysis / "convergence.csv", index=False)

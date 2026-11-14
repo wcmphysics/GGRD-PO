@@ -8,6 +8,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from sklearn.model_selection import GroupKFold
 
+from src.config.base_estimator import required_training_rows
 from src.config.pipeline_schema import TrainConfig
 from src.dataset.contracts import TrainingBatch
 
@@ -97,10 +98,15 @@ def _build_stack_plan(batch: TrainingBatch, config: TrainConfig, repeat: int, ou
     for inner_fold, positions in fit_positions:
         subset = batch.take_positions(positions)
         for base_position, base in enumerate(config.models):
+            label = f"{context} inner={inner_fold} base={base.name}"
+            minimum_rows = required_training_rows(base)
+            _check_training_size(len(subset.X), minimum_rows, label)
             if base.enable_search:
-                label = f"{context} inner={inner_fold} base={base.name} search"
                 search_seed = _seed(root_seed, 3, repeat, outer_fold, inner_fold or 0, base_position)
-                searches[inner_fold, base.name] = _build_partition(subset, config.cv.search_folds, search_seed, label)
+                search = _build_partition(subset, config.cv.search_folds, search_seed, f"{label} search")
+                for search_fold, (training, _) in enumerate(search.folds, start=1):
+                    _check_training_size(len(training), minimum_rows, f"{label} search_fold={search_fold}")
+                searches[inner_fold, base.name] = search
     return StackPlan(stage, repeat or None, outer_fold or None, inner, searches)
 
 
@@ -108,7 +114,14 @@ def _split_settings(config: TrainConfig) -> tuple[object, ...]:
     """Extract configuration fields that determine split meaning and estimator seeds."""
     cv = config.cv
     return (cv.outer_repeats, cv.outer_folds, cv.inner_folds, cv.search_folds, cv.root_seed,
-            tuple((base.name, base.estimator, base.enable_search) for base in config.models))
+            tuple((base.name, base.estimator, base.enable_search, required_training_rows(base))
+                  for base in config.models))
+
+
+def _check_training_size(count: int, minimum: int | None, context: str) -> None:
+    """Reject KNN settings that cannot fit and predict in the local fold."""
+    if minimum is not None and count < minimum:
+        raise ValueError(f"{context}: {count} training rows; n_neighbors requires at least {minimum} rows.")
 
 
 def _partition_signature(partition: Partition) -> tuple[tuple[str, ...], ...]:

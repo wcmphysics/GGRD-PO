@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from hashlib import file_digest
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
@@ -19,6 +19,7 @@ from src.model.stack import FittedStack
 
 BUNDLE_FORMAT = 1
 FEATURE_SCHEMA_VERSION = 1
+_BOOSTER_PACKAGES = {"lightgbm", "catboost", "xgboost"}
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,11 @@ class DeploymentBundle:
     parameter_units: dict[str, str]
 
 
-def _runtime() -> dict:
+def _runtime(extra: set[str]) -> dict:
     """Capture package versions needed to deserialize the trained object graph."""
-    packages = ("numpy", "pandas", "scipy", "scikit-learn", "joblib", "pydantic")
-    return {"python": platform.python_version(), "packages": {package: version(package) for package in packages}}
+    packages = {"numpy", "pandas", "scipy", "scikit-learn", "joblib", "pydantic"} | extra
+    return {"python": platform.python_version(),
+            "packages": {package: version(package) for package in sorted(packages)}}
 
 
 def _sha256(stream: BinaryIO) -> str:
@@ -83,7 +85,9 @@ def _validate_bundle(bundle: DeploymentBundle) -> None:
 
 def _model_metadata(bundle: DeploymentBundle, digest: str) -> dict:
     """Build a sidecar that can be safely inspected before loading any model code."""
-    return {"bundle_format": BUNDLE_FORMAT, "feature_schema_version": FEATURE_SCHEMA_VERSION, "runtime": _runtime(),
+    modules = {type(pipeline.named_steps["estimator"]).__module__.split(".")[0] for pipeline in bundle.stack.pipelines}
+    runtime = _runtime(modules & _BOOSTER_PACKAGES)
+    return {"bundle_format": BUNDLE_FORMAT, "feature_schema_version": FEATURE_SCHEMA_VERSION, "runtime": runtime,
             "payload_sha256": digest, "source_fingerprint": bundle.source_fingerprint,
             "features": [list(pair) for pair in zip(bundle.schema.columns, bundle.schema.dtypes)],
             "base_order": list(bundle.stack.base_names), "parameters": bundle.stack.parameters,
@@ -108,8 +112,14 @@ def _load_metadata(source: Path, digest: str) -> dict:
     metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(metadata, dict):
         raise ValueError(f"Bundle metadata at {source} is {type(metadata).__name__}; expected an object.")
+    recorded = metadata.get("runtime")
+    packages = recorded.get("packages") if isinstance(recorded, dict) else None
+    try:
+        runtime = _runtime(set(packages) & _BOOSTER_PACKAGES if isinstance(packages, dict) else set())
+    except PackageNotFoundError as error:
+        raise ValueError(f"Bundle at {source} requires the installed dependency {error.name!r}.") from error
     checks = {"bundle_format": BUNDLE_FORMAT, "feature_schema_version": FEATURE_SCHEMA_VERSION,
-              "runtime": _runtime(), "payload_sha256": digest}
+              "runtime": runtime, "payload_sha256": digest}
     for field, expected in checks.items():
         if metadata.get(field) != expected:
             raise ValueError(f"Bundle metadata {field}={metadata.get(field)!r}; expected {expected!r} at {source}.")

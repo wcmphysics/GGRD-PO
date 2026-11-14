@@ -1,0 +1,80 @@
+data:
+  csv_path: data/pseudo_data.csv
+  parameter_units:
+    time: synthetic_time_unit
+    temperature: synthetic_temperature_unit
+    thickness: synthetic_thickness_unit
+  target_unit: synthetic_stress_unit
+features:
+  N_step: 4
+cv:
+  outer_folds: 3
+  outer_repeats: 2
+  inner_folds: 3
+  search_folds: 3
+  root_seed: 42
+  mape_min_abs_y: 0.0
+models:
+  - name: ridge
+    estimator: ridge
+    parameters: {alpha: 1.0}
+    enable_search: false
+    search_grid: null
+  - name: random_forest
+    estimator: random_forest
+    parameters: {n_estimators: 60, min_samples_leaf: 3, n_jobs: 1}
+    enable_search: false
+    search_grid: null
+  - name: elastic_net
+    estimator: elastic_net
+    parameters: {alpha: 0.02, l1_ratio: 0.5, max_iter: 1000, tol: 0.0001, selection: cyclic}
+    enable_search: false
+    search_grid: null
+  - name: gaussian_process
+    estimator: gaussian_process
+    parameters:
+      kernel: {kind: rbf, length_scale: 2.0, length_scale_bounds: [0.25, 32.0]}
+      alpha: 0.01
+      optimizer: fmin_l_bfgs_b
+      n_restarts_optimizer: 0
+      normalize_y: true
+    enable_search: false
+    search_grid: null
+  - name: knn
+    estimator: knn
+    parameters: {n_neighbors: 5, weights: distance, p: 2}
+    enable_search: false
+    search_grid: null
+  - name: svr
+    estimator: svr
+    parameters: {C: 2.0, epsilon: 0.05, kernel: rbf, gamma: scale, degree: 3, coef0: 0.0}
+    enable_search: false
+    search_grid: null
+  - name: lightgbm
+    estimator: lightgbm
+    parameters: {n_estimators: 40, learning_rate: 0.05, reg_alpha: 0.0, reg_lambda: 1.0,
+                 num_leaves: 15, min_child_samples: 5, max_depth: 4}
+    enable_search: false
+    search_grid: null
+  - name: catboost
+    estimator: catboost
+    parameters: {iterations: 40, learning_rate: 0.05, depth: 4, l2_leaf_reg: 3.0}
+    enable_search: false
+    search_grid: null
+  - name: xgboost
+    estimator: xgboost
+    parameters: {n_estimators: 40, learning_rate: 0.05, reg_alpha: 0.0, reg_lambda: 1.0,
+                 max_depth: 4, min_child_weight: 1.0, subsample: 1.0, colsample_bytree: 1.0}
+    enable_search: false
+    search_grid: null
+meta:
+  alpha: 0.01
+  max_iterations: 500
+  solver_tolerance: 1.0e-9
+  constraint_tolerance: 1.0e-8
+analysis:
+  transition_ablation: false
+  convergence: true
+  convergence_every: 1
+output:
+  directory: output/train_all_models

@@ -8,6 +8,7 @@ import yaml
 from yaml.constructor import ConstructorError
 from yaml.nodes import MappingNode
 
+from src.config.base_estimator import ModelConfig
 from src.config.pipeline_common import (
     NonemptyText,
     NonnegativeInt,
@@ -21,8 +22,6 @@ from src.optimize.settings import ObjectiveConfig, SearchConfig, SearchDomain, S
 from src.config.pseudo_data_schema import PseudoDataConfig
 
 FoldCount = Annotated[int, Field(strict=True, ge=2)]
-AlphaGrid = Annotated[list[NonnegativeNumber], Field(min_length=1)]
-IntegerGrid = Annotated[list[PositiveInt], Field(min_length=1)]
 
 
 class DataConfig(StrictConfig):
@@ -50,73 +49,6 @@ class CrossValidationConfig(StrictConfig):
     mape_min_abs_y: NonnegativeNumber
 
 
-class RidgeParameters(StrictConfig):
-    """Supported fixed parameters for Ridge."""
-
-    alpha: NonnegativeNumber
-
-
-class ForestParameters(StrictConfig):
-    """Supported fixed parameters for the random forest."""
-
-    n_estimators: PositiveInt
-    min_samples_leaf: PositiveInt
-    n_jobs: Annotated[int, Field(strict=True, ge=1, le=1)]
-
-
-class RidgeGrid(StrictConfig):
-    """Allowed Ridge search candidates."""
-
-    alpha: AlphaGrid
-
-
-class ForestGrid(StrictConfig):
-    """Allowed forest search candidates, with null meaning fixed."""
-
-    n_estimators: IntegerGrid | None
-    min_samples_leaf: IntegerGrid | None
-
-    @model_validator(mode="after")
-    def require_candidates(self) -> "ForestGrid":
-        """Require at least one searched parameter."""
-        if self.n_estimators is None and self.min_samples_leaf is None:
-            raise ValueError("forest grid found two null entries, expected at least one nonempty grid")
-        return self
-
-
-class BaseConfig(StrictConfig):
-    """Common name and search policy for an ordered base model."""
-
-    name: NonemptyText
-    enable_search: StrictBool
-
-    @model_validator(mode="after")
-    def validate_search(self) -> "BaseConfig":
-        """Ensure the grid and enable flag describe one clear policy."""
-        if self.enable_search != (self.search_grid is not None):
-            raise ValueError(f"enable_search={self.enable_search}, expected a grid exactly when search is enabled")
-        return self
-
-
-class RidgeConfig(BaseConfig):
-    """Ridge base model settings."""
-
-    estimator: Literal["ridge"]
-    parameters: RidgeParameters
-    search_grid: RidgeGrid | None
-
-
-class ForestConfig(BaseConfig):
-    """Random forest base model settings."""
-
-    estimator: Literal["random_forest"]
-    parameters: ForestParameters
-    search_grid: ForestGrid | None
-
-
-ModelConfig = Annotated[RidgeConfig | ForestConfig, Field(discriminator="estimator")]
-
-
 class MetaConfig(StrictConfig):
     """Shrinkage and numerical precision for simplex fitting."""
 
@@ -127,9 +59,11 @@ class MetaConfig(StrictConfig):
 
 
 class AnalysisConfig(StrictConfig):
-    """Controls the paired transition feature ablation."""
+    """Control paired feature ablation and fit diagnostics."""
 
     transition_ablation: StrictBool
+    convergence: StrictBool
+    convergence_every: PositiveInt
 
 
 class OutputConfig(StrictConfig):

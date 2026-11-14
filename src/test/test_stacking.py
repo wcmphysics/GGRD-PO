@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config.pipeline_schema import RidgeGrid, TrainConfig, load_config
+from src.config.base_estimator import KnnConfig, KnnGrid, KnnParameters, RidgeGrid
+from src.config.pipeline_schema import TrainConfig, load_config
 from src.dataset.contracts import DepositionStep, ProcessSequence, TrainingBatch, WaferSample
 from src.feature.wide import FeatureSchema, build_training_batch
 from src.inference.bundle import DeploymentBundle, load_bundle, save_bundle
@@ -127,6 +128,41 @@ def test_heldout_label_isolation(train_config: TrainConfig, samples: list[WaferS
     assert not np.allclose(first.y_true, second.y_true)
     assert [trial for trial in original.search_trials if trial["outer_fold_id"] == 1] == [
         trial for trial in perturbed.search_trials if trial["outer_fold_id"] == 1]
+    first_trace = pd.DataFrame(original.convergence.points).query("outer_fold_id == 1")
+    changed_trace = pd.DataFrame(perturbed.convergence.points).query("outer_fold_id == 1")
+    pd.testing.assert_frame_equal(first_trace.query("split == 'train'"), changed_trace.query("split == 'train'"))
+    refit = "scope == 'base_refit' and split == 'validation'"
+    assert not np.allclose(first_trace.query(refit).value, changed_trace.query(refit).value)
+
+
+def test_convergence_preserves_fit(train_config: TrainConfig, samples: list[WaferSample]) -> None:
+    """Tracing does not change predictions and includes every fit's actual final state."""
+    schema, batch = _fixture_batch(samples, train_config)
+    plan = preflight_training(batch, train_config)
+    train_config.analysis.convergence_every = 10
+    traced = evaluate_stack(batch, schema, train_config, plan)
+    train_config.analysis.convergence = False
+    silent = evaluate_stack(batch, schema, train_config, plan)
+    pd.testing.assert_frame_equal(traced.predictions, silent.predictions)
+    assert not silent.convergence.points and not silent.convergence.fits
+    points = pd.DataFrame(traced.convergence.points)
+    forest = points.query("estimator == 'random_forest'")
+    assert set(forest.step) == {1, 2}
+    meta = points.query("scope == 'meta'")
+    assert set(meta.metric) == {"simplex_objective"}
+    for _, track in meta.groupby("outer_fold_id"):
+        assert track.step.iloc[0] == 0
+        assert track.value.iloc[-1] <= track.value.iloc[0] + train_config.meta.constraint_tolerance
+
+
+def test_knn_grid_fails_at_local_training_size(train_config: TrainConfig, samples: list[WaferSample]) -> None:
+    """Preflight checks the deepest search-training subsets, before fitting KNN."""
+    train_config.models[0] = KnnConfig(name="knn", estimator="knn", enable_search=True,
+                                       parameters=KnnParameters(n_neighbors=1, weights="uniform", p=2),
+                                       search_grid=KnnGrid(n_neighbors=[1, 4]))
+    _, batch = _fixture_batch(samples, train_config)
+    with pytest.raises(ValueError, match=r"base=knn search_fold=\d+: .*n_neighbors requires at least 4 rows"):
+        preflight_training(batch, train_config)
 
 
 def test_final_fit_warnings(train_config: TrainConfig, samples: list[WaferSample],

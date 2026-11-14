@@ -36,5 +36,7 @@ meta:
   constraint_tolerance: 1.0e-8
 analysis:
   transition_ablation: true
+  convergence: true
+  convergence_every: 1
 output:
   directory: output/train_demo

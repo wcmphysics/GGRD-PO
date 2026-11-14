@@ -68,13 +68,22 @@ def test_end_to_end(tmp_path: Path) -> None:
     predict = _demo_settings("predict_demo.yaml")
     predict.update(bundle_directory=str(model), output={"directory": str(predicted)})
     fixed = _search_settings("fixed", model, tmp_path / "fixed")
-    result = _run(tmp_path, generate=generator, train=_training_settings(source, train), predict=predict, optimize=fixed)
+    result = _run(tmp_path, generate=generator, train=_training_settings(source, train),
+                  predict=predict, optimize=fixed)
     assert result == tmp_path / "fixed"
     metrics = pd.read_csv(train / "repeat_metrics.csv")
     assert set(metrics.candidate_id) == {"base:ridge", "base:random_forest", "equal_mean", "stack"}
     assert len(metrics) == 8
     assert (train / "search_trials.jsonl").is_file()
     assert (train / "figures" / "transition_ablation.png").is_file()
+    trace = pd.read_csv(train / "analysis" / "convergence.csv")
+    fits = pd.read_csv(train / "analysis" / "convergence_fits.csv")
+    assert set(trace["step_unit"]) == {"tree", "iteration"}
+    assert len(fits.query("scope == 'meta'")) == 5
+    assert set(fits.query("estimator == 'ridge'").status) == {"unavailable"}
+    assert set(trace.query("scope == 'base_refit' and stage == 'outer'").split) == {"train", "validation"}
+    assert set(trace.query("scope == 'base_refit' and stage == 'final'").split) == {"train"}
+    assert (train / "figures" / "convergence_meta.png").is_file()
     table = pd.read_csv(predicted / "predictions.csv")
     assert table.request_id.tolist() == ["synthetic-example"]
     assert table.predicted_stress.notna().all()
