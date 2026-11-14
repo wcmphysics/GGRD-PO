@@ -122,3 +122,47 @@ def test_bundle_selection(tmp_path: Path) -> None:
     assert _resolve_bundle(tmp_path, Path("explicit"), current) == tmp_path / "explicit"
     with pytest.raises(ValueError, match="bundle_directory=null"):
         _resolve_bundle(tmp_path, None, None)
+
+
+@pytest.mark.parametrize("evaluate", [True, False])
+def test_base_workflow(tmp_path: Path, evaluate: bool) -> None:
+    """Publish one model with mode-specific reports and reuse it from a later workflow."""
+    from src.dataset.requests import read_requests
+    from src.inference.bundle import load_bundle
+    from src.inference.predict import predict_sequences
+
+    source = tmp_path / "history.csv"
+    generator = _demo_settings("pseudo_data_config.yaml")
+    generator.update(n_groups=12, output_path=str(source))
+    settings = _training_settings(source, tmp_path / "base")
+    settings.update(mode="base", active_model="ridge", evaluate=evaluate, meta=None)
+    settings["models"][0].update(enable_search=False, search_grid=None)
+    settings["analysis"]["transition_ablation"] = evaluate
+    train = _run(tmp_path, generate=generator, train=settings)
+    manifest = json.loads((train / "manifest.json").read_text(encoding="utf-8"))
+    assert (manifest["mode"], manifest["active_model"], manifest["base_order"]) == ("base", "ridge", ["ridge"])
+    assert manifest["evaluation_status"] == ("grouped_cv" if evaluate else "not_evaluated")
+    assert (train / "wide_table.csv").is_file()
+    assert (train / "figures" / "convergence_availability.png").is_file()
+    assert not (train / "analysis" / "meta_weights.csv").exists()
+    assert not (train / "paired_summary.csv").exists()
+    for filename in ("outer_predictions.csv", "repeat_metrics.csv", "metrics_summary.csv",
+                     "figures/held_out_parity.png", "analysis/ablation_repeat_metrics.csv",
+                     "figures/transition_ablation.png"):
+        assert (train / filename).is_file() == evaluate
+    if evaluate:
+        assert set(pd.read_csv(train / "repeat_metrics.csv").candidate_id) == {"base:ridge"}
+
+    bundle_path = train / "model"
+    predict = _demo_settings("predict_demo.yaml")
+    predict.update(bundle_directory=str(bundle_path), output={"directory": str(tmp_path / "predicted")})
+    result = _run(tmp_path, predict=predict)
+    requests = read_requests(Path(predict["request_path"]))
+    expected = predict_sequences(load_bundle(bundle_path), [request.sequence for request in requests])
+    assert expected.values.tolist() == expected.base["ridge"].tolist()
+    assert pd.read_csv(result / "predictions.csv").predicted_stress.tolist() == pytest.approx(expected.values)
+    if evaluate:
+        optimize = _run(tmp_path, optimize=_search_settings("fixed", bundle_path, tmp_path / "fixed"))
+        _verify_search(optimize)
+        best = json.loads((optimize / "optimization.json").read_text(encoding="utf-8"))["ranked_results"][0]
+        assert best["base_predictions"] == [best["predicted_stress"]]

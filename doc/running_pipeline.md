@@ -21,7 +21,17 @@ The stage calls are in `src/main.py`. A direct `--config src/config/pseudo_data_
 
 ## Base model settings
 
-For the expanded stack, install the CPU dependencies listed in `requirements.txt` and set the `train` stage's `config` to `src/config/train_all_models.yaml`. That profile uses a separate training output directory. The order of `models` determines the order of columns in the stack. Choose at least two models and give each a unique name.
+Training selects its behavior with `mode`, `active_model`, and `evaluate`:
+
+| Mode | Settings | Behavior |
+|---|---|---|
+| Stacked | `mode: stacked`, `active_model: null`, `evaluate: true` | Trains all configured bases and learns the meta weights from inner grouped out-of-fold predictions. |
+| Single base with evaluation | `mode: base`, `active_model: random_forest`, `evaluate: true` | Trains only the named entry in `models`. One level of grouped CV estimates held-out performance. Optional grouped grid search runs within each evaluation training fold. |
+| Single base fit only | `mode: base`, `active_model: random_forest`, `evaluate: false` | Fits only the selected model on all labeled rows. Optional grouped grid search still runs for the final fit. Produces no independent score. Set `analysis.transition_ablation: false`. |
+
+For a single-base example, point the workflow's `train.config` to `src/config/train_base_demo.yaml`. Base mode can use `meta: null`. Both modes save a bundle for the same predict and optimize stages. A single-base bundle passes its prediction through unchanged. A zero spread in a single-base search is a consequence of having one prediction.
+
+For the expanded stack, install the CPU dependencies listed in `requirements.txt` and set the `train` stage's `config` to `src/config/train_all_models.yaml`. That profile uses a separate training output directory. The order of `models` determines the order of columns in the stack. Give each model a unique name. Stacked mode requires at least two models.
 
 | `estimator` | Required entries under `parameters` | Notes |
 |---|---|---|

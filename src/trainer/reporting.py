@@ -60,10 +60,13 @@ def score_repeats(predictions: pd.DataFrame, cutoff: float) -> pd.DataFrame:
     records = []
     expected_ids = tuple(sorted(predictions["row_id"].unique()))
     expected_candidates = set(predictions["candidate_id"])
+    if not expected_candidates:
+        raise ValueError("No evaluation predictions; expected held-out rows from at least one candidate.")
+    reference_name = "stack" if "stack" in expected_candidates else min(expected_candidates)
     for repeat_id, repeat in predictions.groupby("repeat_id", sort=True):
         if set(repeat["candidate_id"]) != expected_candidates:
             raise ValueError(f"Repeat {repeat_id}: candidate set differs; expected {sorted(expected_candidates)}.")
-        reference = repeat.loc[repeat["candidate_id"] == "stack"].sort_values("row_id")
+        reference = repeat.loc[repeat["candidate_id"] == reference_name].sort_values("row_id")
         reference_targets = reference["y_true"].to_numpy()
         eligibility = np.abs(reference_targets) > cutoff
         for name, candidate in repeat.groupby("candidate_id", sort=False):
@@ -115,10 +118,11 @@ def _paired_summary(deltas: pd.DataFrame) -> pd.DataFrame:
 def write_evaluation(evaluation: Evaluation, destination: Path, cutoff: float) -> pd.DataFrame:
     """Persist complete repeat scores and paired comparisons for a full run."""
     metrics = score_repeats(evaluation.predictions, cutoff)
-    deltas = _paired_deltas(metrics)
     tables = {"outer_predictions": evaluation.predictions, "repeat_metrics": metrics,
-              "metrics_summary": _metric_summary(metrics), "paired_deltas": deltas,
-              "paired_summary": _paired_summary(deltas)}
+              "metrics_summary": _metric_summary(metrics)}
+    if metrics.candidate_id.eq("stack").any():
+        deltas = _paired_deltas(metrics)
+        tables.update(paired_deltas=deltas, paired_summary=_paired_summary(deltas))
     for name, table in tables.items():
         table.to_csv(destination / f"{name}.csv", index=False)
     return metrics
@@ -128,10 +132,13 @@ def training_manifest(batch: TrainingBatch, schema: FeatureSchema, config: Train
                       plan: TrainingPlan, input_hashes: dict[str, str]) -> dict:
     """Describe inputs, effective settings, feature ordering, and runtime provenance."""
     packages = ("numpy", "pandas", "scipy", "scikit-learn", "joblib", "pydantic", "PyYAML", "matplotlib", "pytest")
-    packages += tuple(sorted({base.estimator for base in config.models} & {"lightgbm", "catboost", "xgboost"}))
+    packages += tuple(sorted({base.estimator for base in config.active_models} & {"lightgbm", "catboost", "xgboost"}))
     runtime = {"python": platform.python_version(), "packages": {package: version(package) for package in packages}}
     return {"input_hashes": input_hashes, "settings": config.model_dump(mode="json"), "runtime": runtime,
-            "base_order": [base.name for base in config.models], "features": list(zip(schema.columns, schema.dtypes)),
+            "mode": config.mode, "active_model": config.active_model,
+            "evaluation_status": "grouped_cv" if config.evaluate else "not_evaluated",
+            "base_order": [base.name for base in config.active_models],
+            "features": list(zip(schema.columns, schema.dtypes)),
             "identity": {"row_id": "wafer_id", "group_id": "group", "row_order": "lexicographic wafer_id"},
             "n_rows": len(batch.X), "n_groups": len(set(batch.groups)), "estimator_seeds": plan.estimator_seeds,
             "distinct_outer_partitions": plan.distinct_outer_partitions}
@@ -156,9 +163,12 @@ def write_trace_reports(destination: Path, splits: Iterable[dict], evaluations: 
     analysis = destination / "analysis"
     analysis.mkdir(exist_ok=True)
     weights = pd.DataFrame([row for result in all_results for row in result.weights])
-    weights.to_csv(analysis / "meta_weights.csv", index=False)
+    if not weights.empty:
+        weights.to_csv(analysis / "meta_weights.csv", index=False)
     fits = [fit for result in all_results for fit in result.convergence.fits]
     if fits:
         points = [point for result in all_results for point in result.convergence.points]
         pd.DataFrame(fits).to_csv(analysis / "convergence_fits.csv", index=False)
-        pd.DataFrame(points).to_csv(analysis / "convergence.csv", index=False)
+        columns = list(fits[0].keys() - {"status", "reason"}) + ["step", "step_unit", "split", "metric", "value"]
+        point_table = pd.DataFrame(points) if points else pd.DataFrame(columns=sorted(columns))
+        point_table.to_csv(analysis / "convergence.csv", index=False)

@@ -5,11 +5,11 @@ from pathlib import Path
 import pandas as pd
 
 
-def write_transition_ablation(full: pd.DataFrame, ablated: pd.DataFrame, destination: Path) -> None:
-    """Write the paired change in stack MAE after removing transition features."""
+def write_transition_ablation(full: pd.DataFrame, ablated: pd.DataFrame, destination: Path, candidate: str) -> None:
+    """Write the paired change in primary-model MAE after removing transition features."""
     key = ["repeat_id", "outer_fold_id", "row_id", "group_id", "y_true"]
-    full_stack = full.loc[full.candidate_id == "stack", key + ["y_pred"]]
-    ablated_stack = ablated.loc[ablated.candidate_id == "stack", key + ["y_pred"]]
+    full_stack = full.loc[full.candidate_id == candidate, key + ["y_pred"]]
+    ablated_stack = ablated.loc[ablated.candidate_id == candidate, key + ["y_pred"]]
     paired = full_stack.merge(ablated_stack, on=key, suffixes=("_full", "_ablated"), validate="one_to_one")
     if paired.empty or len(paired) != len(full_stack) or len(paired) != len(ablated_stack):
         raise ValueError("Transition ablation: expected identical paired outer rows and labels for both variants")

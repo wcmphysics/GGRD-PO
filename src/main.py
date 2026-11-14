@@ -123,6 +123,19 @@ def _group_references(samples: tuple[WaferSample, ...]) -> dict[str, ProcessSequ
     return dict(sorted(groups.items()))
 
 
+def _log_training_mode(config: TrainConfig, partitions: int) -> None:
+    """Report the active predictors and the evaluation actually scheduled."""
+    LOGGER.info("Training mode: %s; active models: %s", config.mode,
+                ", ".join(base.name for base in config.active_models))
+    if not config.evaluate:
+        LOGGER.info("Fit only: no independent held-out score will be computed.")
+        return
+    LOGGER.info("Grouped evaluation: %d repeats x %d folds, %d distinct partitions",
+                config.cv.outer_repeats, config.cv.outer_folds, partitions)
+    if config.mode == "stacked":
+        LOGGER.info("Meta-training OOF: %d inner folds", config.cv.inner_folds)
+
+
 def _train(config_path: Path, root: Path, headless: bool, timestamp: str, _bundle: Path | None) -> Path:
     """Evaluate grouped stacks, fit deployment, and publish their artifacts together."""
     config_hash = file_fingerprint(config_path)
@@ -146,17 +159,19 @@ def _train(config_path: Path, root: Path, headless: bool, timestamp: str, _bundl
 
         LOGGER.info("Training input %s: %d long rows, %d wafers, %d groups, %d wide features",
                     source, raw_rows, len(batch.X), len(set(batch.groups)), len(schema.columns))
-        LOGGER.info("Grouped CV: %d repeats x %d outer folds, %d inner folds, %d distinct outer partitions; models: %s",
-                    config.cv.outer_repeats, config.cv.outer_folds, config.cv.inner_folds,
-                    plan.distinct_outer_partitions, ", ".join(base.name for base in config.models))
+        _log_training_mode(config, plan.distinct_outer_partitions)
         # Outer evaluation and ablation reuse one plan. Final training uses its separate plan.
-        full = evaluate_stack(batch, schema, config, plan)
-        evaluations = [full]
-        log_evaluation(write_evaluation(full, output, config.cv.mape_min_abs_y))
-        if config.analysis.transition_ablation:
-            ablated = evaluate_stack(batch, schema.without_transitions(), config, plan, variant="transition_ablation")
-            write_transition_ablation(full.predictions, ablated.predictions, output / "analysis")
-            evaluations.append(ablated)
+        evaluations = []
+        if config.evaluate:
+            full = evaluate_stack(batch, schema, config, plan)
+            evaluations.append(full)
+            log_evaluation(write_evaluation(full, output, config.cv.mape_min_abs_y))
+            if config.analysis.transition_ablation:
+                ablated = evaluate_stack(batch, schema.without_transitions(), config, plan,
+                                         variant="transition_ablation")
+                write_transition_ablation(full.predictions, ablated.predictions, output / "analysis",
+                                          config.primary_candidate)
+                evaluations.append(ablated)
         final = fit_deployment(batch, schema, config, plan)
         manifest = training_manifest(batch, schema, config, plan, hashes)
         write_trace_reports(output, split_records(batch, plan), evaluations, final, manifest)
@@ -166,9 +181,12 @@ def _train(config_path: Path, root: Path, headless: bool, timestamp: str, _bundl
             target_unit=config.data.target_unit, parameter_units=config.data.parameter_units.model_dump(),
         )
         save_bundle(bundle, output / "model")
-        LOGGER.info("Final meta weights: %s", ", ".join(f"{name}={weight:.4f}" for name, weight in
-                    zip(final.stack.base_names, final.stack.weights, strict=True)))
-        plot_training(output, headless)
+        if config.mode == "stacked":
+            LOGGER.info("Final meta weights: %s", ", ".join(f"{name}={weight:.4f}" for name, weight in
+                        zip(final.stack.base_names, final.stack.weights, strict=True)))
+        else:
+            LOGGER.info("Final predictor: %s, pass-through weight 1", config.active_model)
+        plot_training(output, headless, config.primary_candidate if config.evaluate else None)
         if config.analysis.convergence:
             plot_convergence(output, headless)
     return destination

@@ -67,11 +67,11 @@ def _format_parity_score(stack: pd.DataFrame) -> str:
     return "undefined" if score is None else f"{score:.3f}"
 
 
-def _plot_parity(run: Path, figures: Path, pyplot: ModuleType) -> None:
+def _plot_parity(run: Path, figures: Path, pyplot: ModuleType, candidate: str = "stack") -> None:
     """Show the full held-out range and a central view at equal scales."""
     predictions = pd.read_csv(run / "outer_predictions.csv")
     first_repeat = predictions.repeat_id.min()
-    stack = predictions.loc[(predictions.repeat_id == first_repeat) & (predictions.candidate_id == "stack")]
+    stack = predictions.loc[(predictions.repeat_id == first_repeat) & (predictions.candidate_id == candidate)]
     pooled = stack[["y_true", "y_pred"]].to_numpy().ravel()
     central_lower, central_upper = np.quantile(pooled, [0.05, 0.95])
     central = _parity_limits(central_lower, central_upper)
@@ -80,7 +80,9 @@ def _plot_parity(run: Path, figures: Path, pyplot: ModuleType) -> None:
     _draw_parity(axes[0], stack, _parity_limits(pooled.min(), pooled.max()), f"Full range ({len(stack)} wafers)")
     _draw_parity(axes[1], stack, central, f"Central view ({inside.sum()} of {len(stack)} wafers)")
     axes[1].text(0.03, 0.97, "Pooled 5th–95th percentiles, padded", transform=axes[1].transAxes, va="top")
-    figure.suptitle(f"Held-out wafers, repeat {first_repeat} · R² = {_format_parity_score(stack)} (all wafers)")
+    label = candidate.removeprefix("base:")
+    score = _format_parity_score(stack)
+    figure.suptitle(f"{label} · Held-out wafers, repeat {first_repeat} · R² = {score} (all wafers)")
     _save(figure, pyplot, figures / "held_out_parity.png")
 
 
@@ -97,13 +99,17 @@ def _plot_pairs(run: Path, figures: Path, pyplot: ModuleType) -> None:
 
 
 def _plot_weights(run: Path, figures: Path, pyplot: ModuleType) -> None:
-    """Display fitted deployment weights and optional held-out ablation."""
+    """Display the fitted deployment weights."""
     weights = pd.read_csv(run / "analysis" / "meta_weights.csv")
     final = weights.loc[weights.stage == "final"]
     figure, axis = pyplot.subplots()
     axis.bar(final.model, final.weight)
     axis.set(ylabel="Final meta weight", ylim=(0, 1))
     _save(figure, pyplot, figures / "meta_weights.png")
+
+
+def _plot_ablation(run: Path, figures: Path, pyplot: ModuleType) -> None:
+    """Plot the held-out change after removing transition features, when available."""
     ablation_path = run / "analysis" / "ablation_repeat_metrics.csv"
     if ablation_path.is_file():
         ablation = pd.read_csv(ablation_path)
@@ -113,15 +119,19 @@ def _plot_weights(run: Path, figures: Path, pyplot: ModuleType) -> None:
         _save(figure, pyplot, figures / "transition_ablation.png")
 
 
-def plot_training(run: Path, headless: bool) -> None:
+def plot_training(run: Path, headless: bool, candidate: str | None) -> None:
     """Render the completed numeric outputs of the training stage."""
     pyplot = _plotting(headless)
     figures = run / "figures"
     figures.mkdir()
     _plot_exploration(run, figures, pyplot)
-    _plot_parity(run, figures, pyplot)
-    _plot_pairs(run, figures, pyplot)
-    _plot_weights(run, figures, pyplot)
+    if candidate is not None:
+        _plot_parity(run, figures, pyplot, candidate)
+    if (run / "paired_deltas.csv").is_file():
+        _plot_pairs(run, figures, pyplot)
+    if (run / "analysis" / "meta_weights.csv").is_file():
+        _plot_weights(run, figures, pyplot)
+    _plot_ablation(run, figures, pyplot)
 
 
 def plot_optimization(run: Path, headless: bool) -> None:
