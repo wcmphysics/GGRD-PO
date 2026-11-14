@@ -56,21 +56,31 @@ Other tools are allowed if they fit tasks better.
 - Ax/BoTorch
 
 
-## Pipeline Stages
-General stages are as follows:
+## General Pipeline Phases and Stages
+### Exploration Phase:
 - Load config
 - Pseudo-data generation or data reading
+- Stateless data preprocessing
+- Feature engineering (avoid creating features causing data leakage)
 - Data exploration
-- Data preprocessing
-- Feature engineering
-- Define models
-- Train-validation-test split (K-fold cross-validation)
-- Data bundling for training
-- Training models and hyper-parameter search
-- Performance metrics
+
+### Modeling Phase:
+- Define base models
+- Build wafer-level model inputs and run repeated outer and inner `GroupKFold` by `group`. See [the CV spec](doc/stacking-regression-cv-spec.en.md).
+- Fit preprocessing within each training subset. If enabled, tune each base model by grouped CV within that subset.
+- Train the constrained meta-model on inner out-of-fold predictions, then refit the base models on the full outer training set.
+- Compare stacking, each base model, and their equal-weight mean on the same outer test folds.
+- After evaluation, rebuild inner out-of-fold predictions on all labeled data, train a new meta-model, and refit the base models on all labeled data.
+- Performance metrics (with uncertainty evaluation)
+- Feature importance analysis
+- Save models
 - Prediction
-- Ensemble of trained models
+
+### Process Optimization Phase
+- Load models
 - Process optimization for the target
+- [pending for future] Confidence level estimatation (by Gaussian Process or conformal prediction)
+- Figure generation/save for all phases
 
 
 ## Agent Instructions
@@ -82,7 +92,7 @@ General stages are as follows:
 ### 2. Workflow
 1. **Clarify:** if anything is ambiguous, ask before acting. Don't hesitate to grill users on decisions.
 2. **Propose:** before changing existing code, state what will change and why. Wait for approval.
-3. **Implement:** once approved, implement, review, and commit. If new decision arises during implementation, ask users for their decision.
+3. **Implement:** once approved, implement, review, and commit. If new decision point arises during implementation, ask users for their decision.
 4. **Review loop:** for new or significant code, launch reviewer subagents. They critique the code, probe edge cases, check error handling, and run tests. Fix what it finds. Repeat up to 3 iterations.
 5. **Commit & push:**
    - Use Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`).
@@ -95,13 +105,13 @@ General stages are as follows:
 - Every new function gets type hints and a concise docstring.
 - For a function with coding line > 30, add 1~2 lines of comment on code block to describe the purpose of the block. 
 - Cyclomatic complexity ≤ 10 per function. Above that, split into single-responsibility helpers.
-- No need for backward compatibility or alias to legacy keys/functions. Tests should be modified to adapt new function whiling keep the original behavior test intact.
-- Use full, explicit names like `learning_rate` (not `lr`).
+- No need for backward compatibility or alias to legacy keys/functions. Tests should be modified to adapt new functions while keeping the original behavior test intact.
+- Use full, explicit names like `learning_rate` (not `lr`). For a name > 30 characters ask users for approval to shorten the name.
 
 ### 4. Modularity
 - New features go in dedicated modules directory. Expose them as functions or classes that `main.py` can import.
 - Keep coupling between modules low and avoid cyclic import. Prefix internal helpers with `_`.
-- A public function with ≥ 6 parameters takes a config `dict` instead. `_`-prefixed helpers are exempt.
+- A public function with > 6 inputs should maintain a cleaner interface by bundling some inputs (using config `dict` or data class) with consistent convention. `_`-prefixed helpers are exempt.   
 
 ### 5. Configuration
 - Single source of truth must be strictly followed.
