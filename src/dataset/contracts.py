@@ -23,7 +23,13 @@ def _validate_parameters(step: object, fields: tuple[str, ...]) -> None:
     """Validate finite recorded settings on a historical or candidate step."""
     for field in fields:
         value = getattr(step, field)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, Real) or not isfinite(value)):
+        if value is None:
+            continue
+        try:
+            finite = not isinstance(value, bool) and isinstance(value, Real) and isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
             raise ValueError(f"Invalid {field}={value!r}; expected a finite number or missing value")
 
 

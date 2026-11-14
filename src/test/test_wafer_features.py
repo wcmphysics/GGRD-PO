@@ -118,6 +118,12 @@ def test_request_value_validation(tmp_path: Path, modification: dict[str, object
         read_requests(path)
 
 
+def test_direct_step_numbers_must_fit_float() -> None:
+    """Reject an integer too large for the feature dtype with field context."""
+    with pytest.raises(ValueError, match=r"Invalid time=.*expected a finite number"):
+        TreatmentStep("anneal", 10**500, None)
+
+
 def test_wide_states_and_transitions() -> None:
     """Wide slots distinguish active missing values, inapplicable values and padding."""
     schema = FeatureSchema(3)
