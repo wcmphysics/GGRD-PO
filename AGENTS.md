@@ -2,9 +2,26 @@
 
 
 ## Project Overview
-This project aiming to first predict the property of a wafer by its process history and second use the predictive power to search for the best process sequence that leads to a specified taget value of that property.
+This project aiming to first predict the property of a wafer by its operation history and second use the predictive power to search for the best process sequence that leads to a specified taget value of that property.
 
-The models are evaluated reliably by repeated K-fold cross-validation. And an esemble of many trained models are utlized to improve prediction power. The raw data are process history of wafers and their measured property.
+The main model is:
+- an stacking model (meta model) composed of several trained base models for better prediction (all base models have uniform interface)
+- evaluated reliably by repeated K-fold cross-validation
+- with constrained weight (like positive, sum to 1, no bias for ridge regression) to constrain its extrapolation 
+
+The raw data:
+- are operation history of wafers, namely an ordered sequence of deposition, treatment, and measurement of wafer property
+- have operation history of varying number of operations (up to `N_step` steps), each with distinct or shared features
+- are stored as long table (see `doc/data_example.md` for raw data examples) and may need transformation to wide table for training 
+- the transition between two operations is characterized by vacuum break: whether the wafer is exposed to atmohphere between operations
+- there is only one type of measurement (default is the stress of the wafer) and it is always carried out at the last step 
+
+Process search:
+- target is a scalar value composed of various weighted components (mean-squared error, process cost, physics-violation penalty, etc.)
+- two search modes in process search: fixed mode (sequence structure is fixed to certain extent) and free mode (no constaint on sequence structure)
+- every candidate sequence is represented as up to `N_step_search` slots (each slot having is_active or operation ∈ {none, deposition, treatment} plus its parameters and vacuum_break).
+- fixed mode: simply pins selected slots/fields in config (e.g., fix `N_step_search` = 2, step1.operation = deposition, step1.material = TiN) and optimizes only the remaining unpinned continuous/categorical variables.
+- free mode: leave is_active / operation / material / recipe unpinned across all `N_step_search` steps.
 
 
 ## Repository Layout
@@ -12,19 +29,18 @@ The models are evaluated reliably by repeated K-fold cross-validation. And an es
 | Path | Contents or Purpose |
 |------|----------|
 | `src/main.py` | End-to-end pipeline orchestration |
-| `src/main.ipynb` | for data exploration |
 | `src/config/` | holds the primary pipeline configuration file `config.yaml` |
 | `src/dataset/` | for bundling data into datasaet for training|
 | `src/inference/` | makes prediction by trained models |
 | `src/model/` | model and cost definition |
-| `src/feature/` | model and cost definition |
-| `src/raw/` | raw data storage |
+| `src/feature/` | feature engineering |
 | `src/test/` | test suite (`test_*.py`) |
 | `src/trainer/` | trains models |
 | `src/utility/` | general utility functions supporting basic operation |
 | `src/visual/` | fucntions to plot and save figures |
 | `src/optimize/` | for process target definition and process optimization functions |
 | `src/analysis/` | analyzes feature importance or reliability of optimized processes |
+| `data/` | raw data storage |
 | `doc/` | documentation |
 | `output/` | stores figures, predictions, and logs |
 
