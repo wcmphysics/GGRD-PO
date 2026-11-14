@@ -1,0 +1,4 @@
+bundle_directory: output/train_demo/model
+request_path: src/config/predict_demo.json
+output:
+  directory: output/predict_demo

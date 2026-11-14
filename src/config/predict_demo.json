@@ -1,0 +1,12 @@
+[
+  {
+    "request_id": "synthetic-example",
+    "sequence": {
+      "steps": [
+        {"operation": "deposition", "material": "TiN", "recipe": "TiN_recipe_v1", "time": 200, "temperature": 500, "thickness": 20},
+        {"operation": "treatment", "recipe": "anneal_v1", "time": 150, "temperature": 500}
+      ],
+      "vacuum_breaks": [0]
+    }
+  }
+]

@@ -225,3 +225,5 @@ PROJECT.md
 TEST_INFRA.md
 TEST_READY.md
 data/pseudo_data.csv
+output/
+.*.stage-*/
