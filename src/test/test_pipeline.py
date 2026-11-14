@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
+import re
 
 import pandas as pd
 import pytest
 import yaml
 
-from src.main import main
+from src.main import _resolve_bundle, main
 
 
 def _demo_settings(name: str) -> dict:
@@ -39,10 +40,10 @@ def _training_settings(source: Path, output: Path) -> dict:
     return settings
 
 
-def _search_settings(mode: str, model: Path, output: Path) -> dict:
+def _search_settings(mode: str, model: Path | None, output: Path) -> dict:
     """Build settings for a short search in the requested mode."""
     settings = _demo_settings(f"optimize_{mode}_demo.yaml")
-    settings["bundle_directory"] = str(model)
+    settings["bundle_directory"] = str(model) if model is not None else None
     settings["output"]["directory"] = str(output)
     settings["search"].update(max_candidates=12, max_attempts=60, batch_size=5)
     return settings
@@ -64,16 +65,25 @@ def test_end_to_end(tmp_path: Path) -> None:
     generator = _demo_settings("pseudo_data_config.yaml")
     source, train, predicted = (tmp_path / name for name in ("history.csv", "train", "predict"))
     generator.update(n_groups=16, output_path=str(source))
-    model = train / "model"
     predict = _demo_settings("predict_demo.yaml")
-    predict.update(bundle_directory=str(model), output={"directory": str(predicted)})
-    fixed = _search_settings("fixed", model, tmp_path / "fixed")
+    predict.update(bundle_directory=None, output={"directory": str(predicted)})
+    fixed = _search_settings("fixed", None, tmp_path / "fixed")
     result = _run(tmp_path, generate=generator, train=_training_settings(source, train),
                   predict=predict, optimize=fixed)
-    assert result == tmp_path / "fixed"
+    stamp = result.name.removeprefix("fixed_")
+    assert re.fullmatch(r"\d{8}T\d{12}Z", stamp)
+    train, predicted = (tmp_path / f"{name}_{stamp}" for name in ("train", "predict"))
+    model = train / "model"
     metrics = pd.read_csv(train / "repeat_metrics.csv")
     assert set(metrics.candidate_id) == {"base:ridge", "base:random_forest", "equal_mean", "stack"}
     assert len(metrics) == 8
+    assert metrics.r2.notna().all()
+    wide = pd.read_csv(train / "wide_table.csv")
+    held_out = pd.read_csv(train / "outer_predictions.csv").query("repeat_id == 1 and candidate_id == 'stack'")
+    joined = wide.merge(held_out, left_on="wafer_id", right_on="row_id", validate="one_to_one")
+    assert len(joined) == len(wide) == len(held_out)
+    assert joined.target_stress.tolist() == joined.y_true.tolist()
+    assert "step_1_temperature_observed" in wide
     assert (train / "search_trials.jsonl").is_file()
     assert (train / "figures" / "transition_ablation.png").is_file()
     trace = pd.read_csv(train / "analysis" / "convergence.csv")
@@ -89,8 +99,9 @@ def test_end_to_end(tmp_path: Path) -> None:
     assert table.predicted_stress.notna().all()
     _verify_search(result)
     _verify_search(_run(tmp_path, optimize=_search_settings("free", model, tmp_path / "free")))
-    with pytest.raises(FileExistsError, match="fresh directory"):
-        _run(tmp_path, predict=predict)
+    predict["bundle_directory"] = str(model)
+    again = _run(tmp_path, predict=predict)
+    assert again != predicted and (again / "predictions.csv").is_file()
 
 
 def test_failed_stage_is_not_published(tmp_path: Path) -> None:
@@ -100,4 +111,14 @@ def test_failed_stage_is_not_published(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _run(tmp_path, train=settings)
     assert not destination.exists()
-    assert not list(tmp_path.glob(".failed.stage-*"))
+    assert not list(tmp_path.glob("failed_*"))
+    assert not list(tmp_path.glob(".failed_*.stage-*"))
+
+
+def test_bundle_selection(tmp_path: Path) -> None:
+    """Use a current bundle only on request and fail clearly when none exists."""
+    current = tmp_path / "current"
+    assert _resolve_bundle(tmp_path, None, current) == current
+    assert _resolve_bundle(tmp_path, Path("explicit"), current) == tmp_path / "explicit"
+    with pytest.raises(ValueError, match="bundle_directory=null"):
+        _resolve_bundle(tmp_path, None, None)

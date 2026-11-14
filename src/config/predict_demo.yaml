@@ -1,4 +1,4 @@
-bundle_directory: output/train_demo/model
+bundle_directory: null  # Use the bundle produced by training in this workflow.
 request_path: src/config/predict_demo.json
 output:
   directory: output/predict_demo

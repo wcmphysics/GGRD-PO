@@ -1,11 +1,22 @@
 """Publish completed stage output under a fresh directory."""
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterator
+
+
+def run_timestamp() -> str:
+    """Return a UTC timestamp suitable for sharing across one workflow's output names."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def timestamped_output(stem: Path, timestamp: str) -> Path:
+    """Append the workflow timestamp to the configured directory name."""
+    return stem.with_name(f"{stem.name}_{timestamp}")
 
 
 @contextmanager

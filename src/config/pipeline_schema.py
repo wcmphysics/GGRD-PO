@@ -95,7 +95,7 @@ class TrainConfig(StrictConfig):
 class PredictConfig(StrictConfig):
     """Bundle, request collection, and output for inference."""
 
-    bundle_directory: Path
+    bundle_directory: Path | None
     request_path: Path
     output: OutputConfig
 
@@ -111,7 +111,7 @@ class SyntheticDomainConfig(StrictConfig):
 class OptimizeConfig(StrictConfig):
     """Bundle and validated process domain for a fresh search run."""
 
-    bundle_directory: Path
+    bundle_directory: Path | None
     domain: Annotated[SyntheticDomainConfig | SearchDomain, Field(discriminator="source")]
     search: SearchConfig
     objective: ObjectiveConfig

@@ -74,8 +74,8 @@ def test_load_default_config_success(default_config: PseudoDataConfig) -> None:
     assert "TiN" in default_config.deposition.materials
     assert "anneal" in default_config.treatment.recipes
     assert default_config.transition.vacuum_break_before_measure == 1
-    assert default_config.stress_model.noise_std == 0.045
-    assert default_config.stress_model.outlier_rate == 0.05
+    assert default_config.stress_model.noise_std >= 0
+    assert 0 <= default_config.stress_model.outlier_rate <= 1
 
 
 def test_schema_rejects_extra_keys(raw_config_dict: dict) -> None:

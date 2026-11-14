@@ -40,11 +40,13 @@ from src.inference.bundle import DeploymentBundle, load_bundle, save_bundle
 from src.inference.predict import predict_sequences
 from src.optimize.domain import synthetic_domain
 from src.optimize.search import SearchContext, optimize_sequences
-from src.trainer.reporting import training_manifest, write_evaluation, write_trace_reports
+from src.trainer.reporting import (
+    log_evaluation, training_manifest, write_evaluation, write_trace_reports, write_wide_table,
+)
 from src.trainer.splits import preflight_training, split_records
 from src.trainer.stacking import evaluate_stack, fit_deployment
 from src.utility.pseudo_data import generate_pseudo_data, save_pseudo_data
-from src.utility.run_output import file_fingerprint, stage_output, write_json
+from src.utility.run_output import file_fingerprint, run_timestamp, stage_output, timestamped_output, write_json
 from src.visual.convergence import plot_convergence
 from src.visual.pipeline_plots import plot_optimization, plot_training
 
@@ -104,7 +106,7 @@ def _generate(configuration: PseudoDataConfig, root: Path) -> Path:
     return saved_path
 
 
-def _generate_stage(config_path: Path, root: Path, _headless: bool) -> Path:
+def _generate_stage(config_path: Path, root: Path, _headless: bool, _timestamp: str, _bundle: Path | None) -> Path:
     """Load the enabled generation stage and write its CSV."""
     return _generate(load_pseudo_data_config(config_path), root)
 
@@ -121,13 +123,13 @@ def _group_references(samples: tuple[WaferSample, ...]) -> dict[str, ProcessSequ
     return dict(sorted(groups.items()))
 
 
-def _train(config_path: Path, root: Path, headless: bool) -> Path:
+def _train(config_path: Path, root: Path, headless: bool, timestamp: str, _bundle: Path | None) -> Path:
     """Evaluate grouped stacks, fit deployment, and publish their artifacts together."""
     config_hash = file_fingerprint(config_path)
     config = load_config(config_path, TrainConfig)
     if file_fingerprint(config_path) != config_hash:
         raise ValueError(f"Configuration {config_path} changed while reading it. Expected stable settings.")
-    destination = root / config.output.directory
+    destination = timestamped_output(root / config.output.directory, timestamp)
     source = root / config.data.csv_path
     with stage_output(destination) as output:
         # Canonical data and all nested group plans exist before any estimator sees a row.
@@ -136,14 +138,21 @@ def _train(config_path: Path, root: Path, headless: bool) -> Path:
         schema = FeatureSchema(config.features.N_step)
         batch = build_training_batch(samples, schema)
         plan = preflight_training(batch, config)
-        write_exploration(samples, _record_count(source), output / "exploration")
+        raw_rows = _record_count(source)
+        write_exploration(samples, raw_rows, output / "exploration")
+        write_wide_table(batch, output / "wide_table.csv")
         if file_fingerprint(source) != hashes["source_csv"]:
             raise ValueError(f"Wafer history {source} changed while reading it. Expected a stable training input.")
 
+        LOGGER.info("Training input %s: %d long rows, %d wafers, %d groups, %d wide features",
+                    source, raw_rows, len(batch.X), len(set(batch.groups)), len(schema.columns))
+        LOGGER.info("Grouped CV: %d repeats x %d outer folds, %d inner folds, %d distinct outer partitions; models: %s",
+                    config.cv.outer_repeats, config.cv.outer_folds, config.cv.inner_folds,
+                    plan.distinct_outer_partitions, ", ".join(base.name for base in config.models))
         # Outer evaluation and ablation reuse one plan. Final training uses its separate plan.
         full = evaluate_stack(batch, schema, config, plan)
         evaluations = [full]
-        write_evaluation(full, output, config.cv.mape_min_abs_y)
+        log_evaluation(write_evaluation(full, output, config.cv.mape_min_abs_y))
         if config.analysis.transition_ablation:
             ablated = evaluate_stack(batch, schema.without_transitions(), config, plan, variant="transition_ablation")
             write_transition_ablation(full.predictions, ablated.predictions, output / "analysis")
@@ -157,18 +166,21 @@ def _train(config_path: Path, root: Path, headless: bool) -> Path:
             target_unit=config.data.target_unit, parameter_units=config.data.parameter_units.model_dump(),
         )
         save_bundle(bundle, output / "model")
+        LOGGER.info("Final meta weights: %s", ", ".join(f"{name}={weight:.4f}" for name, weight in
+                    zip(final.stack.base_names, final.stack.weights, strict=True)))
         plot_training(output, headless)
         if config.analysis.convergence:
             plot_convergence(output, headless)
     return destination
 
 
-def _predict(config_path: Path, root: Path, _headless: bool) -> Path:
+def _predict(config_path: Path, root: Path, _headless: bool, timestamp: str, trained_bundle: Path | None) -> Path:
     """Read ordered, unlabeled requests and write their stress predictions."""
     config = load_config(config_path, PredictConfig)
-    destination = root / config.output.directory
+    destination = timestamped_output(root / config.output.directory, timestamp)
+    bundle_dir = _resolve_bundle(root, config.bundle_directory, trained_bundle)
     with stage_output(destination) as output:
-        bundle = load_bundle(root / config.bundle_directory)
+        bundle = load_bundle(bundle_dir)
         requests = read_requests(root / config.request_path)
         result = predict_sequences(bundle, tuple(request.sequence for request in requests))
         pd.DataFrame({
@@ -176,14 +188,25 @@ def _predict(config_path: Path, root: Path, _headless: bool) -> Path:
             "predicted_stress": result.values,
             "target_unit": bundle.target_unit,
         }).to_csv(output / "predictions.csv", index=False)
+    LOGGER.info("Predicted %d requests with %s (%s), range %.4g to %.4g", len(requests), bundle_dir,
+                bundle.target_unit, result.values.min(), result.values.max())
     return destination
 
 
-def _optimize(config_path: Path, root: Path, headless: bool) -> Path:
+def _resolve_bundle(root: Path, explicit: Path | None, trained_bundle: Path | None) -> Path:
+    """Use the configured bundle, or this workflow's training result when requested."""
+    if explicit is not None:
+        return root / explicit
+    if trained_bundle is None:
+        raise ValueError("bundle_directory=null; expected training in this workflow or a saved bundle directory.")
+    return trained_bundle
+
+
+def _optimize(config_path: Path, root: Path, headless: bool, timestamp: str, trained_bundle: Path | None) -> Path:
     """Search legal sequences using one loaded predictor and publish a trial ledger."""
     config = load_config(config_path, OptimizeConfig)
-    bundle_dir = root / config.bundle_directory
-    destination = root / config.output.directory
+    bundle_dir = _resolve_bundle(root, config.bundle_directory, trained_bundle)
+    destination = timestamped_output(root / config.output.directory, timestamp)
     with stage_output(destination) as output:
         # Adapt the recipe catalog and validate units before constructing a search context.
         bundle_file = bundle_dir / "bundle.joblib"
@@ -215,6 +238,10 @@ def _optimize(config_path: Path, root: Path, headless: bool) -> Path:
 
             write_json(output / "synthetic_audit.json", audit_latent_results(result.summary, generator))
         plot_optimization(output, headless)
+    best = result.summary["ranked_results"][0]
+    LOGGER.info("%s search with %s: %d evaluated (%s), best stress %.4g vs target %.4g, objective %.4g",
+                config.search.mode, bundle_dir, result.summary["scored"], result.summary["stop_reason"],
+                best["predicted_stress"], best["target_stress"], best["objective"])
     return destination
 
 
@@ -237,6 +264,8 @@ def _write_rank_table(summary: dict, output: Path) -> None:
 
 def _run_stages(config: PipelineConfig, headless: bool) -> Path:
     """Run enabled stages in dependency order and return the last result."""
+    stamp = run_timestamp()
+    trained_bundle = None
     stages = (
         ("generate", config.generate, _generate_stage),
         ("train", config.train, _train),
@@ -249,11 +278,14 @@ def _run_stages(config: PipelineConfig, headless: bool) -> Path:
             continue
         assert settings.config is not None  # Validated by StageConfig.
         try:
-            output = run(_REPO_ROOT / settings.config, _REPO_ROOT, headless)
+            path = _REPO_ROOT / settings.config
+            output = run(path, _REPO_ROOT, headless, stamp, trained_bundle)
         except (OSError, RuntimeError, ValueError) as error:
             LOGGER.error("%s failed: %s", name, error)
             raise
         LOGGER.info("Published %s outputs to %s", name, output)
+        if name == "train":
+            trained_bundle = output / "model"
         outputs.append(output)
     return outputs[-1]
 

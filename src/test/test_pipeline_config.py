@@ -14,7 +14,8 @@ def test_demo_configs() -> None:
     train = load_config(workflow.train.config, TrainConfig)
     predict = load_config(workflow.predict.config, PredictConfig)
     assert workflow.train.enabled
-    assert train.output.directory / "model" == predict.bundle_directory
+    assert train.output.directory.name == "train_demo"
+    assert predict.bundle_directory is None
     assert predict.request_path.is_file()
 
 

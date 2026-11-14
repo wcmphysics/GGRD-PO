@@ -1,4 +1,4 @@
-bundle_directory: output/train_demo/model
+bundle_directory: null  # Use the bundle produced by training in this workflow.
 domain:
   source: synthetic
   generator_config_path: src/config/pseudo_data_config.yaml
