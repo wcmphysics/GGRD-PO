@@ -3,12 +3,14 @@
 from collections.abc import Iterable, Sequence
 from importlib.metadata import version
 import json
+import logging
 from pathlib import Path
 import platform
 
 import numpy as np
 import pandas as pd
 
+from src.analysis.regression import held_out_r2
 from src.config.pipeline_schema import TrainConfig
 from src.dataset.contracts import TrainingBatch
 from src.feature.wide import FeatureSchema
@@ -16,13 +18,31 @@ from src.trainer.splits import TrainingPlan
 from src.trainer.stacking import Evaluation, FittedResult
 
 
-METRICS = ("mae", "rmse", "mape_pct")
+METRICS = ("mae", "rmse", "mape_pct", "r2")
+LOGGER = logging.getLogger(__name__)
+
+
+def write_wide_table(batch: TrainingBatch, destination: Path) -> None:
+    """Export the untransformed feature rows, target, and identities for inspection."""
+    table = batch.X.copy()
+    table.insert(0, "target_stress", batch.y)
+    table.insert(0, "group", batch.groups)
+    table.insert(0, "wafer_id", batch.wafer_ids)
+    table.to_csv(destination, index=False)
+
+
+def log_evaluation(metrics: pd.DataFrame) -> None:
+    """Print held-out mean scores in descending order of MAE performance."""
+    averaged = metrics.groupby("candidate_id")[list(METRICS)].mean().sort_values("mae")
+    LOGGER.info("Mean held-out metrics across %d repeats:\n%s", metrics.repeat_id.nunique(),
+                averaged.to_string(float_format=lambda value: f"{value:.4f}", na_rep="n/a"))
 
 
 def _score_candidate(held_out: pd.DataFrame, eligible: np.ndarray) -> dict:
     """Compute one candidate's metrics from its complete aligned repeat."""
     targets = held_out["y_true"].to_numpy()
-    errors = np.abs(held_out["y_pred"].to_numpy() - targets)
+    predictions = held_out["y_pred"].to_numpy()
+    errors = np.abs(predictions - targets)
     if not np.isfinite(errors).all() or not len(errors):
         raise ValueError("Invalid outer residuals; expected finite errors for every held-out wafer.")
     eligible_count = int(eligible.sum())
@@ -31,6 +51,7 @@ def _score_candidate(held_out: pd.DataFrame, eligible: np.ndarray) -> dict:
     if not all(np.isfinite(metric) for metric in (mae, rmse, mape) if metric is not None):
         raise ValueError("Outer metrics overflowed; expected finite MAE, RMSE and any available MAPE.")
     return {"n_scored": len(errors), "mae": mae, "rmse": rmse, "mape_pct": mape,
+            "r2": held_out_r2(targets, predictions),
             "n_mape_eligible": eligible_count, "n_mape_excluded": len(errors) - eligible_count}
 
 
@@ -71,11 +92,12 @@ def _metric_summary(metrics: pd.DataFrame) -> pd.DataFrame:
 
 
 def _paired_deltas(metrics: pd.DataFrame) -> pd.DataFrame:
-    """Subtract the stack metric from each matched baseline within each repeat."""
+    """Report paired changes with positive values favoring the stack for every metric."""
     primary = metrics.loc[metrics["candidate_id"] == "stack"].set_index("repeat_id")
     records = []
     for baseline_id, baseline in metrics.loc[metrics["candidate_id"] != "stack"].groupby("candidate_id", sort=False):
         deltas = baseline.set_index("repeat_id")[list(METRICS)] - primary[list(METRICS)]
+        deltas["r2"] = -deltas["r2"]
         records.append(deltas.rename_axis(columns="metric").stack(future_stack=True).rename("delta")
                        .reset_index().assign(baseline_id=baseline_id))
     return pd.concat(records, ignore_index=True)[["repeat_id", "baseline_id", "metric", "delta"]]

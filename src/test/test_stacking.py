@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import r2_score
 
 from src.config.base_estimator import KnnConfig, KnnGrid, KnnParameters, RidgeGrid
 from src.config.pipeline_schema import TrainConfig, load_config
@@ -238,8 +239,10 @@ def test_pooled_paired_metrics(tmp_path: Path) -> None:
     assert scores.loc["stack", "mape_pct"] == pytest.approx(15)
     assert scores.loc["stack", "mae"] == pytest.approx((10 + 10 + 3 + 0.99) / 4)
     assert scores.loc["stack", "rmse"] == pytest.approx(np.sqrt((100 + 100 + 9 + 0.99**2) / 4))
+    assert scores.loc["stack", "r2"] == pytest.approx(r2_score(frame.y_true, frame.y_pred))
     paired = pd.read_csv(tmp_path / "paired_summary.csv").set_index("metric")
     assert paired.loc["mape_pct", "mean_delta"] == pytest.approx(15)
+    assert paired.loc["r2", "mean_delta"] == pytest.approx(scores.loc["stack", "r2"] - scores.loc["equal_mean", "r2"])
     assert pd.isna(paired.loc["mae", "sample_sd_delta"])
     assert score_repeats(predictions, 100)["mape_pct"].isna().all()
     write_evaluation(Evaluation(predictions, [], []), tmp_path, 100)

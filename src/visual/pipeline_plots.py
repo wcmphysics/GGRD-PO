@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from src.analysis.regression import held_out_r2
+
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
@@ -59,6 +61,12 @@ def _draw_parity(axis: "Axes", stack: pd.DataFrame, limits: tuple[float, float],
     axis.set_aspect("equal", adjustable="box")
 
 
+def _format_parity_score(stack: pd.DataFrame) -> str:
+    """Report R² over all held-out pairs and mark undefined cases."""
+    score = held_out_r2(stack.y_true.to_numpy(), stack.y_pred.to_numpy())
+    return "undefined" if score is None else f"{score:.3f}"
+
+
 def _plot_parity(run: Path, figures: Path, pyplot: ModuleType) -> None:
     """Show the full held-out range and a central view at equal scales."""
     predictions = pd.read_csv(run / "outer_predictions.csv")
@@ -72,7 +80,7 @@ def _plot_parity(run: Path, figures: Path, pyplot: ModuleType) -> None:
     _draw_parity(axes[0], stack, _parity_limits(pooled.min(), pooled.max()), f"Full range ({len(stack)} wafers)")
     _draw_parity(axes[1], stack, central, f"Central view ({inside.sum()} of {len(stack)} wafers)")
     axes[1].text(0.03, 0.97, "Pooled 5th–95th percentiles, padded", transform=axes[1].transAxes, va="top")
-    figure.suptitle(f"Held-out wafers, repeat {first_repeat}")
+    figure.suptitle(f"Held-out wafers, repeat {first_repeat} · R² = {_format_parity_score(stack)} (all wafers)")
     _save(figure, pyplot, figures / "held_out_parity.png")
 
 

@@ -15,13 +15,13 @@ Edit `src/config/config.yaml` to set `enabled: true` for the stages you want. Ea
 | `predict` | `src/config/predict_demo.yaml` reads a saved bundle and a JSON file of process sequences. |
 | `optimize` | `src/config/optimize_free_demo.yaml` searches for a recipe using a saved bundle. Select `src/config/optimize_fixed_demo.yaml` to run with pinned recipe settings. |
 
-To run the demo from generation through optimization, enable all four stages. The demo's prediction and search settings already point to the bundle written by training. To use a previously fitted model, disable training and set `bundle_directory` in the enabled consumer settings. If you change the training output directory and want to use the new model in the same run, update the consumer's bundle path to match. Training, prediction, and search each require a fresh output directory.
+To run the demo from generation through optimization, enable all four stages. Training, prediction, and search append the same UTC timestamp to their configured output directory names, for example `output/train_demo_20261114T120000123456Z`. The generator uses its configured CSV path. Leave `bundle_directory: null` in the prediction and search settings to use the model trained in that workflow. To use a previously fitted model, set `bundle_directory` to its saved `model/` path.
 
 The stage calls are in `src/main.py`. A direct `--config src/config/pseudo_data_config.yaml` invocation still runs generation alone.
 
 ## Base model settings
 
-For the expanded stack, install the CPU dependencies listed in `requirements.txt` and set the `train` stage's `config` to `src/config/train_all_models.yaml`. That profile uses a separate training output directory. Update `bundle_directory` in predict and optimize settings if those stages should consume the expanded stack. The order of `models` determines the order of columns in the stack. Choose at least two models and give each a unique name.
+For the expanded stack, install the CPU dependencies listed in `requirements.txt` and set the `train` stage's `config` to `src/config/train_all_models.yaml`. That profile uses a separate training output directory. The order of `models` determines the order of columns in the stack. Choose at least two models and give each a unique name.
 
 | `estimator` | Required entries under `parameters` | Notes |
 |---|---|---|
@@ -54,4 +54,6 @@ The figures show each individual fit and the median among curves with a recorded
 | Meta-model | One major SLSQP iteration. Shows the MSE plus weight penalty on the inner OOF prediction matrix used to fit the weights. |
 | Ridge, KNN, SVR | The configured Ridge and SVR APIs do not expose intermediate costs, and KNN has no iterative training objective. The fit availability report lists these cases. |
 
-`figures/held_out_parity.png` shows the same held-out predictions in a full-range panel and a percentile-zoomed panel. The zoom reports how many points fall inside its limits. Scores still use all eligible held-out rows.
+`wide_table.csv` saves one row per training wafer with `wafer_id`, `group`, `target_stress`, and the exact pre-imputation feature columns. Empty numeric cells are interpreted using the slot and observation flags. `figures/held_out_parity.png` shows full-range and central views, with one R² calculated on all held-out stack predictions in the displayed repeat. The console prints data and CV sizes, mean held-out metrics, final weights, and output paths.
+
+`repeat_metrics.csv` also reports R² pooled across the outer holdouts in each repeat. The paired R² difference is stack minus baseline. Error metrics use baseline minus stack, so positive differences favor the stack in both cases.

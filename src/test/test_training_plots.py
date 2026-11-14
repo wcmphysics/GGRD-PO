@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING
 
 import pandas as pd
 from pytest import MonkeyPatch
@@ -9,15 +10,18 @@ from pytest import MonkeyPatch
 from src.visual import pipeline_plots
 from src.visual.convergence import plot_convergence
 
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+
 
 def test_parity_draws_full_and_central_ranges(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    """Retain the outlier in the full view and make the zoom's coverage explicit."""
+    """Retain the outlier in the full view and use it for the shared score."""
     frame = pd.DataFrame({"repeat_id": 1, "candidate_id": "stack", "y_true": [0, 1, 2, 3, 4, 99],
                           "y_pred": [0.5, 1.5, 2.5, 3.5, 4.5, 4.0]})
     frame.to_csv(tmp_path / "outer_predictions.csv", index=False)
     pyplot = pipeline_plots._plotting(True)
 
-    def inspect(figure: object, backend: ModuleType, destination: Path) -> None:
+    def inspect(figure: "Figure", backend: ModuleType, destination: Path) -> None:
         """Check the figure before rendering and releasing it."""
         full, center = figure.axes
         assert full.get_xlim() == full.get_ylim()
@@ -25,6 +29,7 @@ def test_parity_draws_full_and_central_ranges(tmp_path: Path, monkeypatch: Monke
         assert full.get_xlim()[1] > frame.y_true.max() > center.get_xlim()[1]
         assert len(full.collections[0].get_offsets()) == len(frame)
         assert "5 of 6 wafers" in center.get_title()
+        assert "R² = -0.150 (all wafers)" in figure.get_suptitle()
         backend.close(figure)
 
     monkeypatch.setattr(pipeline_plots, "_save", inspect)
